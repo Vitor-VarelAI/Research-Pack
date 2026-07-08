@@ -1,0 +1,200 @@
+#!/usr/bin/env node
+import "dotenv/config";
+import { Command } from "commander";
+import { createFirecrawlProvider, runFirecrawlAgent, scrapeFirecrawlStructured } from "./providers/firecrawl.js";
+import { createFileStore } from "./storage/file-store.js";
+import { CrawlOptionsSchema, type RunRecord, type ScrapedDocument } from "./types.js";
+import { extractBuiltIn, type BuiltInSchemaName } from "./extract.js";
+import {
+  getBuiltInExtractionJsonSchema,
+  isBuiltInExtractionSchemaName,
+  parseBuiltInExtraction,
+} from "./schemas/registry.js";
+import { makeId, nowIso } from "./util.js";
+import { getHnAiContext, getHnTopStories } from "./hn.js";
+import { buildRadarReportFromHn } from "./radar.js";
+
+const program = new Command();
+
+program
+  .name("scrape-agent")
+  .description("Backend-first scrape agent MVP powered by Firecrawl")
+  .version("0.1.0");
+
+program
+  .command("scrape")
+  .description("Scrape one URL and save raw JSON + markdown")
+  .argument("<url>", "URL to scrape")
+  .option("--json", "print full JSON instead of summary")
+  .action(async (url: string, options: { json?: boolean }) => {
+    const provider = createFirecrawlProvider();
+    const store = createFileStore();
+    const document = await provider.scrape(url);
+    await store.saveDocument(document);
+    await saveRun("scrape", { url }, { documentId: document.id, url: document.url });
+    print(options.json ? document : summarizeDocument(document));
+  });
+
+program
+  .command("map")
+  .description("Discover URLs on a site")
+  .argument("<url>", "URL to map")
+  .option("--limit <number>", "max URLs to print", parseInteger, 50)
+  .action(async (url: string, options: { limit: number }) => {
+    const provider = createFirecrawlProvider();
+    const links = (await provider.map(url)).slice(0, options.limit);
+    await saveRun("map", { url, limit: options.limit }, { count: links.length, links });
+    print({ count: links.length, links });
+  });
+
+program
+  .command("crawl")
+  .description("Crawl a site and save documents")
+  .argument("<url>", "URL to crawl")
+  .option("--limit <number>", "max pages", parseInteger, 10)
+  .option("--include <paths...>", "include path globs")
+  .option("--exclude <paths...>", "exclude path globs")
+  .option("--wait-for <ms>", "wait before extraction", parseInteger)
+  .action(async (url: string, options: { limit: number; include?: string[]; exclude?: string[]; waitFor?: number }) => {
+    const provider = createFirecrawlProvider();
+    const store = createFileStore();
+    const crawlOptions = CrawlOptionsSchema.parse({
+      limit: options.limit,
+      includePaths: options.include,
+      excludePaths: options.exclude,
+      waitForMs: options.waitFor,
+    });
+    const documents = await provider.crawl(url, crawlOptions);
+    await Promise.all(documents.map((document) => store.saveDocument(document)));
+    await saveRun("crawl", { url, ...crawlOptions }, { count: documents.length, ids: documents.map((doc) => doc.id) });
+    print({ count: documents.length, documents: documents.map(summarizeDocument) });
+  });
+
+program
+  .command("extract")
+  .description("Scrape one URL and extract into a built-in schema")
+  .argument("<url>", "URL to extract from")
+  .option("--schema <name>", "built-in schema name: article", "article")
+  .action(async (url: string, options: { schema: string }) => {
+    if (options.schema !== "article") throw new Error(`Unknown schema: ${options.schema}`);
+    const provider = createFirecrawlProvider();
+    const store = createFileStore();
+    const document = await provider.scrape(url);
+    const extraction = extractBuiltIn(options.schema as BuiltInSchemaName, document);
+    await store.saveDocument(document);
+    await store.saveExtraction(`${options.schema}-${document.id}`, extraction);
+    await saveRun("extract", { url, schema: options.schema }, { documentId: document.id, extraction });
+    print(extraction);
+  });
+
+program
+  .command("extract-ai")
+  .description("Scrape one URL and extract structured JSON using Firecrawl JSON mode")
+  .argument("<url>", "URL to extract from")
+  .option("--schema <name>", "built-in schema: article | web-research", "web-research")
+  .option("--prompt <text>", "extraction instruction", "Extract only facts explicitly supported by the page. Include evidence and source URLs when available.")
+  .action(async (url: string, options: { schema: string; prompt: string }) => {
+    if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
+    const result = await scrapeFirecrawlStructured({
+      url,
+      prompt: options.prompt,
+      schema: getBuiltInExtractionJsonSchema(options.schema),
+    });
+    const parsed = parseBuiltInExtraction(options.schema, result.data);
+    const store = createFileStore();
+    await store.saveDocument(result.document);
+    await store.saveExtraction(`extract-ai-${options.schema}-${result.document.id}`, parsed);
+    await saveRun("extract-ai", { url, schema: options.schema, prompt: options.prompt }, { documentId: result.document.id, extraction: parsed });
+    print(parsed);
+  });
+
+program
+  .command("radar-hn")
+  .description("Collect broad HN radar signals without editorial filtering")
+  .option("--top <number>", "HN top stories to inspect", parseInteger, 120)
+  .option("--limit <number>", "radar items to return", parseInteger, 20)
+  .action(async (options: { top: number; limit: number }) => {
+    const stories = await getHnTopStories(options.top);
+    const report = buildRadarReportFromHn(stories, options.limit);
+    await saveRun("radar-hn", options, { itemCount: report.items.length, items: report.items });
+    print(report);
+  });
+
+program
+  .command("hn-ai")
+  .description("Fetch top AI stories from Hacker News plus same-frontpage context")
+  .option("--top <number>", "HN top stories to inspect", parseInteger, 120)
+  .option("--limit <number>", "AI stories to return", parseInteger, 3)
+  .option("--neighbors <number>", "same-frontpage neighbor stories to include", parseInteger, 12)
+  .action(async (options: { top: number; limit: number; neighbors: number }) => {
+    const context = await getHnAiContext({
+      topStoriesLimit: options.top,
+      aiStoriesLimit: options.limit,
+      neighborLimit: options.neighbors,
+    });
+    await saveRun("hn-ai", options, { aiStories: context.aiStories, sameBoard: context.sameBoard });
+    print(context);
+  });
+
+program
+  .command("agent")
+  .description("Use Firecrawl Agent for multi-page structured LLM extraction")
+  .argument("<prompt>", "task for the web extraction agent")
+  .option("--url <urls...>", "optional URLs to focus the agent")
+  .option("--schema <name>", "built-in schema: article | web-research", "web-research")
+  .option("--model <name>", "Firecrawl Spark model: spark-1-mini | spark-1-pro", "spark-1-mini")
+  .action(async (prompt: string, options: { url?: string[]; schema: string; model: string }) => {
+    if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
+    if (options.model !== "spark-1-mini" && options.model !== "spark-1-pro") throw new Error(`Unknown model: ${options.model}`);
+
+    const result = await runFirecrawlAgent({
+      prompt,
+      ...(options.url ? { urls: options.url } : {}),
+      schema: getBuiltInExtractionJsonSchema(options.schema),
+      model: options.model,
+    });
+    const parsed = parseBuiltInExtraction(options.schema, result.data);
+    const store = createFileStore();
+    await store.saveExtraction(`agent-${options.schema}-${makeId("result")}`, parsed);
+    await saveRun("agent", { prompt, urls: options.url ?? [], schema: options.schema, model: options.model }, { result: parsed });
+    print(parsed);
+  });
+
+program.parseAsync(process.argv).catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`scrape-agent: ${message}`);
+  process.exitCode = 1;
+});
+
+async function saveRun(command: string, input: Record<string, unknown>, output: Record<string, unknown>): Promise<void> {
+  const store = createFileStore();
+  const record: RunRecord = {
+    id: makeId("run"),
+    command,
+    input,
+    output,
+    createdAt: nowIso(),
+  };
+  await store.saveRun(record);
+}
+
+function parseInteger(value: string): number {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed)) throw new Error(`Invalid integer: ${value}`);
+  return parsed;
+}
+
+function summarizeDocument(document: ScrapedDocument): Record<string, unknown> {
+  return {
+    id: document.id,
+    url: document.url,
+    title: document.title ?? null,
+    provider: document.provider,
+    markdownChars: document.markdown?.length ?? 0,
+    links: document.links.length,
+  };
+}
+
+function print(value: unknown): void {
+  console.log(JSON.stringify(value, null, 2));
+}
