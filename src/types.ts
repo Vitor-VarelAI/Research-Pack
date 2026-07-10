@@ -56,9 +56,35 @@ export const CrawlOptionsSchema = z.object({
 });
 export type CrawlOptions = z.infer<typeof CrawlOptionsSchema>;
 
+/**
+ * Result of a crawl, including pagination/cost metadata preserved from the
+ * provider responses.
+ *
+ * - `documents`: every document aggregated across all followed `next` pages.
+ * - `pages`: number of status pages fetched (1 + number of `next` follows).
+ * - `creditsUsed`: total credits reported by the provider for the job.
+ *   Firecrawl reports this cumulatively per status response, so the last
+ *   non-null value seen across pages is preserved (not summed).
+ * - `durationMs`: provider-reported duration, if exposed. Preserved as the
+ *   last non-null value seen.
+ * - `startedAt` / `finishedAt` / `expiresAt`: provider-reported timestamps,
+ *   if exposed on any status page.
+ *
+ * All metadata fields are `null` when the provider did not report them.
+ */
+export type CrawlResult = {
+  documents: ScrapedDocument[];
+  pages: number;
+  creditsUsed: number | null;
+  durationMs: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  expiresAt: string | null;
+};
+
 export type CrawlProvider = {
   scrape(url: string, options?: ScrapeOptions): Promise<ScrapedDocument>;
-  crawl(url: string, options: CrawlOptions): Promise<ScrapedDocument[]>;
+  crawl(url: string, options: CrawlOptions): Promise<CrawlResult>;
   map(url: string): Promise<string[]>;
 };
 

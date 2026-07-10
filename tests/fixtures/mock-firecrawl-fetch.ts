@@ -9,11 +9,16 @@
  * includes optional cache-provenance fields (`fromCache`, `cacheState`,
  * `metadata.scrapedAt`) when `MOCK_FIRECRAWL_CACHE` is set to `cached` or
  * `fresh`.
+ *
+ * Crawl pagination is mocked with a fixed two-page sequence (same-origin
+ * absolute `next`) so CLI `crawl` tests can assert metadata preservation
+ * without a paid provider.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
 const recordPath = process.env.MOCK_FIRECRAWL_RECORD;
 const cacheMode = process.env.MOCK_FIRECRAWL_CACHE ?? "none";
+const baseUrl = process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2";
 
 function cacheFields(): Record<string, unknown> {
   if (cacheMode === "cached") return { fromCache: true, cacheState: "hit" };
@@ -28,8 +33,18 @@ function record(url: string, body: unknown): void {
   writeFileSync(recordPath, JSON.stringify(existing));
 }
 
+function crawlDoc(n: number) {
+  return {
+    markdown: `# Mocked crawl page ${n}`,
+    html: `<h1>page ${n}</h1>`,
+    links: [`https://example.com/crawl-${n}`],
+    metadata: { sourceURL: `https://example.com/crawl-${n}`, title: `page ${n}`, scrapedAt: "2026-07-10T00:00:00.000Z" },
+  };
+}
+
 globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
   const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+  const method = (init?.method ?? "GET").toUpperCase();
   const parsedBody = init?.body ? JSON.parse(String(init.body)) : null;
   record(url, parsedBody);
 
@@ -53,6 +68,44 @@ globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Pr
 
   if (url.endsWith("/agent")) {
     return Response.json({ success: true, data: { answer: "mocked agent answer", facts: [], sources: [], confidence: "medium" } });
+  }
+
+  // Crawl start.
+  if (url.endsWith("/crawl") && method === "POST") {
+    return Response.json({ success: true, id: "mock_crawl_job" });
+  }
+
+  // Crawl status: first page (same-origin absolute next to page 2).
+  if (url.endsWith("/crawl/mock_crawl_job")) {
+    return Response.json({
+      success: true,
+      status: "completed",
+      completed: 1,
+      total: 2,
+      creditsUsed: 7,
+      durationMs: 1500,
+      startedAt: "2026-07-10T00:00:00.000Z",
+      finishedAt: "2026-07-10T00:00:01.500Z",
+      expiresAt: "2026-07-10T01:00:00.000Z",
+      next: `${baseUrl}/crawl/mock_crawl_job?next=page2`,
+      data: [crawlDoc(1)],
+    });
+  }
+
+  // Crawl status: second page (no next).
+  if (url.includes("next=page2")) {
+    return Response.json({
+      success: true,
+      status: "completed",
+      completed: 2,
+      total: 2,
+      creditsUsed: 7,
+      durationMs: 1500,
+      startedAt: "2026-07-10T00:00:00.000Z",
+      finishedAt: "2026-07-10T00:00:01.500Z",
+      expiresAt: "2026-07-10T01:00:00.000Z",
+      data: [crawlDoc(2)],
+    });
   }
 
   return Response.json({ error: "not found" }, { status: 404 });

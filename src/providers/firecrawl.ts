@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { CrawlOptionsSchema, type CrawlOptions, type CrawlProvider, type Provenance, type ScrapedDocument, type ScrapeOptions } from "../types.js";
+import { CrawlOptionsSchema, type CrawlOptions, type CrawlProvider, type CrawlResult, type Provenance, type ScrapedDocument, type ScrapeOptions } from "../types.js";
 import { makeId, nowIso } from "../util.js";
 
 const FirecrawlPageDataSchema = z.object({
@@ -44,11 +44,28 @@ const FirecrawlCrawlStartResponseSchema = z.object({
   error: z.string().optional(),
 });
 
+/**
+ * Firecrawl crawl status response.
+ *
+ * Pagination/cost fields are optional and only populated when the provider
+ * exposes them:
+ * - `next`: a relative or absolute URL to fetch the next page of results.
+ *   Cross-origin `next` URLs are rejected before the bearer token is sent.
+ * - `creditsUsed`: cumulative credits used by the job (provider-reported).
+ * - `durationMs`: provider-reported job duration, when exposed.
+ * - `startedAt` / `finishedAt` / `expiresAt`: provider-reported timestamps.
+ */
 const FirecrawlCrawlStatusResponseSchema = z.object({
   success: z.boolean().optional(),
   status: z.string().optional(),
   completed: z.number().optional(),
   total: z.number().optional(),
+  creditsUsed: z.number().optional(),
+  durationMs: z.number().optional(),
+  startedAt: z.string().optional(),
+  finishedAt: z.string().optional(),
+  expiresAt: z.string().optional(),
+  next: z.string().optional(),
   data: z.array(FirecrawlPageDataSchema).optional(),
   error: z.string().optional(),
 });
@@ -173,8 +190,16 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
     pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
   };
 
-  async function request(path: string, init: RequestInit): Promise<unknown> {
-    const response = await fetch(`${resolved.baseUrl}${path}`, {
+  /**
+   * Issue an authenticated Firecrawl request. `target` may be either a path
+   * (resolved against `baseUrl`) or a full absolute URL. Callers MUST ensure
+   * any absolute URL passed here is same-origin with `baseUrl` before calling,
+   * because the bearer token is attached unconditionally. Use
+   * `resolveNextUrl` + `assertSameOrigin` for provider-supplied `next` URLs.
+   */
+  async function request(target: string, init: RequestInit): Promise<unknown> {
+    const url = /^https?:\/\//i.test(target) ? target : `${resolved.baseUrl}${target}`;
+    const response = await fetch(url, {
       ...init,
       headers: {
         "Authorization": `Bearer ${resolved.apiKey}`,
@@ -194,6 +219,58 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
 
   function normalizeMapLinks(links: FirecrawlMapLink[]): string[] {
     return links.map((link) => typeof link === "string" ? link : link.url);
+  }
+
+  /**
+   * Poll `GET /crawl/{id}` until it reaches a terminal status or the deadline
+   * expires. Returns the parsed terminal status response (which may carry a
+   * `next` page URL and cost metadata).
+   */
+  async function pollCrawlStatus(id: string, deadline: number): Promise<z.infer<typeof FirecrawlCrawlStatusResponseSchema>> {
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, resolved.pollIntervalMs));
+      const statusBody = await request(`/crawl/${id}`, { method: "GET" });
+      const status = FirecrawlCrawlStatusResponseSchema.parse(statusBody);
+      if (status.success === false) throw new Error(status.error ?? "Firecrawl crawl failed");
+      if (status.status === "completed") return status;
+      if (status.status === "failed" || status.status === "cancelled") {
+        throw new Error(`Firecrawl crawl ${status.status}`);
+      }
+    }
+    throw new Error(`Firecrawl crawl timed out after ${resolved.pollTimeoutMs}ms`);
+  }
+
+  /**
+   * Resolve a provider-supplied `next` value (relative or absolute URL)
+   * against the Firecrawl base URL. Throws on unparseable input.
+   */
+  function resolveNextUrl(next: string, baseUrl: string): string {
+    try {
+      return new URL(next, baseUrl).toString();
+    } catch {
+      throw new Error(`Firecrawl crawl returned an invalid 'next' URL: ${next}`);
+    }
+  }
+
+  /**
+   * Reject cross-origin `next` URLs. The bearer token must never be sent to
+   * another origin, so this is checked before any authenticated request to a
+   * provider-supplied URL. Same-origin = same protocol + host + port.
+   */
+  function assertSameOrigin(targetUrl: string, baseUrl: string): void {
+    let target: URL;
+    let base: URL;
+    try {
+      target = new URL(targetUrl);
+      base = new URL(baseUrl);
+    } catch {
+      throw new Error(`Firecrawl crawl 'next' is not a valid URL: ${targetUrl}`);
+    }
+    if (target.origin !== base.origin) {
+      throw new Error(
+        `Firecrawl crawl 'next' is cross-origin (${target.origin}); refusing to send bearer token to another origin (base ${base.origin})`,
+      );
+    }
   }
 
   return {
@@ -226,7 +303,7 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
       return normalizeMapLinks(parsed.data?.links ?? []);
     },
 
-    async crawl(url: string, options: CrawlOptions): Promise<ScrapedDocument[]> {
+    async crawl(url: string, options: CrawlOptions): Promise<CrawlResult> {
       const opts = CrawlOptionsSchema.parse(options);
       const requestedAt = nowIso();
       const startBody = await request("/crawl", {
@@ -247,19 +324,50 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
       if (start.success === false || !start.id) throw new Error(start.error ?? "Firecrawl crawl did not return a job id");
 
       const deadline = Date.now() + resolved.pollTimeoutMs;
-      while (Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, resolved.pollIntervalMs));
-        const statusBody = await request(`/crawl/${start.id}`, { method: "GET" });
-        const status = FirecrawlCrawlStatusResponseSchema.parse(statusBody);
-        if (status.success === false) throw new Error(status.error ?? "Firecrawl crawl failed");
-        if (status.status === "completed") {
-          return (status.data ?? []).map((item) => toDocument(url, item, buildProvenance(requestedAt, opts.maxAgeMs, { data: item })));
+      let status = await pollCrawlStatus(start.id, deadline);
+
+      // Aggregate documents and preserve pagination/cost metadata across all
+      // `next` pages. Firecrawl reports `creditsUsed`/`durationMs`
+      // cumulatively per status response, so the last non-null value seen is
+      // preserved rather than summed across pages.
+      const aggregated: FirecrawlPageData[] = [...(status.data ?? [])];
+      let creditsUsed = status.creditsUsed ?? null;
+      let durationMs = status.durationMs ?? null;
+      let startedAt = status.startedAt ?? null;
+      let finishedAt = status.finishedAt ?? null;
+      let expiresAt = status.expiresAt ?? null;
+      let pages = 1;
+
+      // Safety cap: a malformed/lying provider could return `next` forever.
+      // `limit` caps documents; this caps pagination pages to guarantee
+      // termination even when a page returns zero documents with a `next`.
+      const MAX_PAGES = 1000;
+
+      let next = status.next;
+      while (next) {
+        if (pages >= MAX_PAGES) {
+          throw new Error(`Firecrawl crawl exceeded ${MAX_PAGES} pagination pages without terminating`);
         }
-        if (status.status === "failed" || status.status === "cancelled") {
-          throw new Error(`Firecrawl crawl ${status.status}`);
-        }
+        // Resolve relative `next` against the base URL, then reject any
+        // cross-origin target BEFORE issuing an authenticated request, so the
+        // bearer token is never sent to another origin.
+        const nextUrl = resolveNextUrl(next, resolved.baseUrl);
+        assertSameOrigin(nextUrl, resolved.baseUrl);
+        const pageBody = await request(nextUrl, { method: "GET" });
+        const page = FirecrawlCrawlStatusResponseSchema.parse(pageBody);
+        if (page.success === false) throw new Error(page.error ?? "Firecrawl crawl pagination failed");
+        aggregated.push(...(page.data ?? []));
+        if (typeof page.creditsUsed === "number") creditsUsed = page.creditsUsed;
+        if (typeof page.durationMs === "number") durationMs = page.durationMs;
+        if (typeof page.startedAt === "string") startedAt = page.startedAt;
+        if (typeof page.finishedAt === "string") finishedAt = page.finishedAt;
+        if (typeof page.expiresAt === "string") expiresAt = page.expiresAt;
+        next = page.next;
+        pages += 1;
       }
-      throw new Error(`Firecrawl crawl timed out after ${resolved.pollTimeoutMs}ms`);
+
+      const documents = aggregated.map((item) => toDocument(url, item, buildProvenance(requestedAt, opts.maxAgeMs, { data: item })));
+      return { documents, pages, creditsUsed, durationMs, startedAt, finishedAt, expiresAt };
     },
   };
 }
