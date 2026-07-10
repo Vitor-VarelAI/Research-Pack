@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.json",
+    "test": "node --import tsx --test \"tests/**/*.test.ts\"",
     "start": "node dist/cli.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint:editorial": "scripts/editorial-lint.sh",

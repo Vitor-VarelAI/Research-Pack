@@ -28,6 +28,8 @@ export const HnStorySchema = z.object({
 });
 export type HnStory = z.infer<typeof HnStorySchema>;
 
+const HN_API_BASE = process.env.HN_API_BASE ?? "https://hacker-news.firebaseio.com/v0";
+
 const AI_SIGNAL_PATTERNS: Record<string, RegExp> = {
   ai: /\bAI\b|artificial intelligence/i,
   llm: /\bLLM\b|language model/i,
@@ -58,7 +60,7 @@ export type HnAiContext = {
 };
 
 export async function getHnTopStories(limit: number): Promise<HnStory[]> {
-  const ids = await getJson<number[]>("https://hacker-news.firebaseio.com/v0/topstories.json");
+  const ids = await getJson<number[]>(hnApiUrl("topstories.json"));
   const limitedIds = ids.slice(0, limit);
   const items = await Promise.all(limitedIds.map((id, index) => getHnItem(id).then((item) => ({ item, rank: index + 1 }))));
   return items
@@ -120,7 +122,11 @@ function buildSameBoard(aiStories: HnStory[], sameFrontpage: HnStory[]): HnAiCon
 }
 
 async function getHnItem(id: number): Promise<HnItem> {
-  return HnItemSchema.parse(await getJson<unknown>(`https://hacker-news.firebaseio.com/v0/item/${id}.json`));
+  return HnItemSchema.parse(await getJson<unknown>(hnApiUrl(`item/${id}.json`)));
+}
+
+function hnApiUrl(path: string): string {
+  return new URL(path, `${HN_API_BASE.replace(/\/$/, "")}/`).toString();
 }
 
 async function getJson<T>(url: string): Promise<T> {
