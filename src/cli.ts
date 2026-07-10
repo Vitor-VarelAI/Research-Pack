@@ -27,12 +27,14 @@ program
   .description("Scrape one URL and save raw JSON + markdown")
   .argument("<url>", "URL to scrape")
   .option("--json", "print full JSON instead of summary")
-  .action(async (url: string, options: { json?: boolean }) => {
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (omit to skip; 0 forces fresh)", parseInteger)
+  .action(async (url: string, options: { json?: boolean; maxAge?: number }) => {
+    const maxAgeMs = resolveContentMaxAge(options.maxAge);
     const provider = createFirecrawlProvider();
     const store = createFileStore();
-    const document = await provider.scrape(url);
+    const document = await provider.scrape(url, maxAgeMs !== undefined ? { maxAgeMs } : undefined);
     await store.saveDocument(document);
-    await saveRun("scrape", { url }, { documentId: document.id, url: document.url });
+    await saveRun("scrape", { url, ...(maxAgeMs !== undefined ? { maxAgeMs } : {}) }, { documentId: document.id, url: document.url });
     print(options.json ? document : summarizeDocument(document));
   });
 
@@ -56,7 +58,8 @@ program
   .option("--include <paths...>", "include path globs")
   .option("--exclude <paths...>", "exclude path globs")
   .option("--wait-for <ms>", "wait before extraction", parseInteger)
-  .action(async (url: string, options: { limit: number; include?: string[]; exclude?: string[]; waitFor?: number }) => {
+  .option("--max-age <ms>", "Firecrawl maxAge in ms for crawl scrapeOptions (omit to skip; 0 forces fresh)", parseInteger)
+  .action(async (url: string, options: { limit: number; include?: string[]; exclude?: string[]; waitFor?: number; maxAge?: number }) => {
     const provider = createFirecrawlProvider();
     const store = createFileStore();
     const crawlOptions = CrawlOptionsSchema.parse({
@@ -64,6 +67,7 @@ program
       includePaths: options.include,
       excludePaths: options.exclude,
       waitForMs: options.waitFor,
+      maxAgeMs: resolveContentMaxAge(options.maxAge),
     });
     const documents = await provider.crawl(url, crawlOptions);
     await Promise.all(documents.map((document) => store.saveDocument(document)));
@@ -76,15 +80,17 @@ program
   .description("Scrape one URL and extract into a built-in schema")
   .argument("<url>", "URL to extract from")
   .option("--schema <name>", "built-in schema name: article", "article")
-  .action(async (url: string, options: { schema: string }) => {
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (omit to skip; 0 forces fresh)", parseInteger)
+  .action(async (url: string, options: { schema: string; maxAge?: number }) => {
     if (options.schema !== "article") throw new Error(`Unknown schema: ${options.schema}`);
+    const maxAgeMs = resolveContentMaxAge(options.maxAge);
     const provider = createFirecrawlProvider();
     const store = createFileStore();
-    const document = await provider.scrape(url);
+    const document = await provider.scrape(url, maxAgeMs !== undefined ? { maxAgeMs } : undefined);
     const extraction = extractBuiltIn(options.schema as BuiltInSchemaName, document);
     await store.saveDocument(document);
     await store.saveExtraction(`${options.schema}-${document.id}`, extraction);
-    await saveRun("extract", { url, schema: options.schema }, { documentId: document.id, extraction });
+    await saveRun("extract", { url, schema: options.schema, ...(maxAgeMs !== undefined ? { maxAgeMs } : {}) }, { documentId: document.id, extraction });
     print(extraction);
   });
 
@@ -94,7 +100,8 @@ program
   .argument("<url>", "URL to extract from")
   .option("--schema <name>", "built-in schema: article | web-research", "web-research")
   .option("--prompt <text>", "extraction instruction", "Extract only facts explicitly supported by the page. Include evidence and source URLs when available.")
-  .action(async (url: string, options: { schema: string; prompt: string }) => {
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseInteger)
+  .action(async (url: string, options: { schema: string; prompt: string; maxAge?: number }) => {
     if (options.schema === "fact-check") {
       throw new Error(
         "extract-ai --schema fact-check is deprecated for single-page usage.\n" +
@@ -104,16 +111,18 @@ program
       );
     }
     if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
+    const maxAgeMs = resolveResearchMaxAge(options.maxAge);
     const result = await scrapeFirecrawlStructured({
       url,
       prompt: options.prompt,
       schema: getBuiltInExtractionJsonSchema(options.schema),
+      maxAgeMs,
     });
     const parsed = parseBuiltInExtraction(options.schema, result.data);
     const store = createFileStore();
     await store.saveDocument(result.document);
     await store.saveExtraction(`extract-ai-${options.schema}-${result.document.id}`, parsed);
-    await saveRun("extract-ai", { url, schema: options.schema, prompt: options.prompt }, { documentId: result.document.id, extraction: parsed });
+    await saveRun("extract-ai", { url, schema: options.schema, prompt: options.prompt, maxAgeMs }, { documentId: result.document.id, extraction: parsed });
     print(parsed);
   });
 
@@ -152,20 +161,23 @@ program
   .option("--url <urls...>", "optional URLs to focus the agent")
   .option("--schema <name>", "built-in schema: article | web-research", "web-research")
   .option("--model <name>", "Firecrawl Spark model: spark-1-mini | spark-1-pro", "spark-1-mini")
-  .action(async (prompt: string, options: { url?: string[]; schema: string; model: string }) => {
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseInteger)
+  .action(async (prompt: string, options: { url?: string[]; schema: string; model: string; maxAge?: number }) => {
     if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
     if (options.model !== "spark-1-mini" && options.model !== "spark-1-pro") throw new Error(`Unknown model: ${options.model}`);
 
+    const maxAgeMs = resolveResearchMaxAge(options.maxAge);
     const result = await runFirecrawlAgent({
       prompt,
       ...(options.url ? { urls: options.url } : {}),
       schema: getBuiltInExtractionJsonSchema(options.schema),
       model: options.model,
+      maxAgeMs,
     });
     const parsed = parseBuiltInExtraction(options.schema, result.data);
     const store = createFileStore();
     await store.saveExtraction(`agent-${options.schema}-${makeId("result")}`, parsed);
-    await saveRun("agent", { prompt, urls: options.url ?? [], schema: options.schema, model: options.model }, { result: parsed });
+    await saveRun("agent", { prompt, urls: options.url ?? [], schema: options.schema, model: options.model, maxAgeMs }, { result: parsed });
     print(parsed);
   });
 
@@ -217,6 +229,31 @@ function parseInteger(value: string): number {
   return parsed;
 }
 
+/**
+ * Resolve maxAge for general content commands (scrape/extract/crawl).
+ *
+ * Returns the explicit `--max-age` value if given, else the
+ * `SCRAPE_AGENT_DEFAULT_MAX_AGE_MS` env var if set, else `undefined` (maxAge
+ * is not sent in the Firecrawl payload).
+ */
+function resolveContentMaxAge(explicit: number | undefined): number | undefined {
+  if (explicit !== undefined) return explicit;
+  const env = process.env.SCRAPE_AGENT_DEFAULT_MAX_AGE_MS;
+  if (env !== undefined && env !== "") {
+    const n = Number.parseInt(env, 10);
+    if (Number.isFinite(n) && n >= 0) return n;
+  }
+  return undefined;
+}
+
+/**
+ * Resolve maxAge for research/fact-check style commands (extract-ai, agent).
+ * Defaults to `0` (force fresh, never serve cache) unless overridden.
+ */
+function resolveResearchMaxAge(explicit: number | undefined): number {
+  return explicit ?? 0;
+}
+
 function summarizeDocument(document: ScrapedDocument): Record<string, unknown> {
   return {
     id: document.id,
@@ -225,6 +262,7 @@ function summarizeDocument(document: ScrapedDocument): Record<string, unknown> {
     provider: document.provider,
     markdownChars: document.markdown?.length ?? 0,
     links: document.links.length,
+    provenance: document.provenance,
   };
 }
 
