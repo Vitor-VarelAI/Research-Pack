@@ -69,10 +69,28 @@ program
       waitForMs: options.waitFor,
       maxAgeMs: resolveContentMaxAge(options.maxAge),
     });
-    const documents = await provider.crawl(url, crawlOptions);
-    await Promise.all(documents.map((document) => store.saveDocument(document)));
-    await saveRun("crawl", { url, ...crawlOptions }, { count: documents.length, ids: documents.map((doc) => doc.id) });
-    print({ count: documents.length, documents: documents.map(summarizeDocument) });
+    const result = await provider.crawl(url, crawlOptions);
+    await Promise.all(result.documents.map((document) => store.saveDocument(document)));
+    await saveRun("crawl", { url, ...crawlOptions }, {
+      count: result.documents.length,
+      ids: result.documents.map((doc) => doc.id),
+      pages: result.pages,
+      creditsUsed: result.creditsUsed,
+      durationMs: result.durationMs,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      expiresAt: result.expiresAt,
+    });
+    print({
+      count: result.documents.length,
+      documents: result.documents.map(summarizeDocument),
+      pages: result.pages,
+      creditsUsed: result.creditsUsed,
+      durationMs: result.durationMs,
+      startedAt: result.startedAt,
+      finishedAt: result.finishedAt,
+      expiresAt: result.expiresAt,
+    });
   });
 
 program
