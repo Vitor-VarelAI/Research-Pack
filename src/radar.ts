@@ -69,11 +69,18 @@ export const RadarReportSchema = z.object({
 });
 export type RadarReport = z.infer<typeof RadarReportSchema>;
 
+// Short acronyms (UI, UX, API, app, OS, EU, US, PR) are wrapped in word
+// boundaries (\b) so they only match as standalone tokens. Without \b the
+// case-insensitive substring match produced false positives such as
+// "Build" -> UI, "Postgres" -> OS, "Rust" -> US, "programming" -> PR,
+// and "happy"/"mapping" -> app. Word boundaries preserve true detections
+// of UI, API, EU, US and PR as standalone tokens (e.g. "UI library",
+// "OpenAI API", "EU AI Act", "US export controls", "a PR stunt").
 const SIGNAL_RULES: Array<{ signal: RadarSignal; pattern: RegExp; reason: string }> = [
-  { signal: "ai-tool", pattern: /\bAI\b|artificial intelligence|ChatGPT|Claude|Gemini|OpenAI|Anthropic|Mistral|LLM/i, reason: "AI/model/tool signal" },
+  { signal: "ai-tool", pattern: /\bAI\b|artificial intelligence|ChatGPT|Claude|Gemini|OpenAI|Anthropic|Mistral|\bLLM\b/i, reason: "AI/model/tool signal" },
   { signal: "model-release", pattern: /\bGPT[-\s]?\d|model|release|launch|preview|introduc/i, reason: "model or product release" },
   { signal: "web-design", pattern: /web design|landing page|website|portfolio|design system/i, reason: "web/design topic" },
-  { signal: "ui-experiment", pattern: /UI|UX|interface|interaction|prototype/i, reason: "interface or interaction experiment" },
+  { signal: "ui-experiment", pattern: /\bUI\b|\bUX\b|interface|interaction|prototype/i, reason: "interface or interaction experiment" },
   { signal: "frontend-craft", pattern: /frontend|CSS|React|Next\.js|animation|component/i, reason: "frontend craft" },
   { signal: "vfx-motion", pattern: /VFX|motion design|animation|cinematic|After Effects|CapCut/i, reason: "motion/VFX topic" },
   { signal: "generative-video", pattern: /video generation|generative video|Kling|Veo|Sora|Runway|Seedance/i, reason: "generative video" },
@@ -88,14 +95,24 @@ const SIGNAL_RULES: Array<{ signal: RadarSignal; pattern: RegExp; reason: string
   { signal: "benchmark", pattern: /benchmark|leaderboard|eval|SWE|Terminal-Bench|score/i, reason: "benchmark/eval" },
   { signal: "failure-limitation", pattern: /fail|bug|limitation|broken|regression|worse|problem/i, reason: "failure/limitation" },
   { signal: "visual-demo", pattern: /demo|screenshot|gallery|visual|render|3D|image/i, reason: "visual/demo asset" },
-  { signal: "repo-code", pattern: /github\.com|repo|repository|code/i, reason: "code repository" },
+  { signal: "repo-code", pattern: /github\.com|\brepo\b|repository|code/i, reason: "code repository" },
   { signal: "paper-research", pattern: /paper|arxiv|research|study|scientists/i, reason: "research/paper" },
   { signal: "interactive-demo", pattern: /interactive|playground|demo|live/i, reason: "interactive demo" },
-  { signal: "api-distribution", pattern: /API|SDK|developer|app|plugin|browser|OS|cloud|marketplace|platform/i, reason: "distribution surface" },
+  { signal: "api-distribution", pattern: /\bAPI\b|SDK|developer|\bapp\b|plugin|browser|\bOS\b|cloud|marketplace|platform/i, reason: "distribution surface" },
   { signal: "platform-lock-in", pattern: /lock[-\s]?in|ecosystem|platform|closed|subscription|only available|exclusive/i, reason: "lock-in or ecosystem control" },
-  { signal: "market-strategy", pattern: /earnings|stock|shares|rival|competitor|acquisition|layoff|hiring|regulation|antitrust|PR/i, reason: "market or strategic timing" },
-  { signal: "infrastructure-geopolitics", pattern: /chip|GPU|Nvidia|cloud|compute|energy|copyright|China|Europe|EU|US|security|sovereign/i, reason: "infrastructure/geopolitics constraint" },
+  { signal: "market-strategy", pattern: /earnings|stock|shares|rival|competitor|acquisition|layoff|hiring|regulation|antitrust|\bPR\b/i, reason: "market or strategic timing" },
+  { signal: "infrastructure-geopolitics", pattern: /chip|GPU|Nvidia|cloud|compute|energy|copyright|China|Europe|\bEU\b|\bUS\b|security|sovereign/i, reason: "infrastructure/geopolitics constraint" },
 ];
+
+/**
+ * Return the radar signals matched in `haystack`. Exported for tests so that
+ * false-positive / true-positive assertions can run without constructing a
+ * full HnStory + report.
+ */
+export function detectRadarSignals(haystack: string): RadarSignal[] {
+  const matched = SIGNAL_RULES.filter((rule) => rule.pattern.test(haystack));
+  return [...new Set(matched.map((rule) => rule.signal))];
+}
 
 const RADAR_CRITERIA = [
   "AI tools e model releases",
@@ -117,7 +134,7 @@ const RADAR_CRITERIA = [
 export function buildRadarReportFromHn(stories: HnStory[], limit: number): RadarReport {
   const items = stories
     .map(scoreHnStory)
-    .filter((item) => item.totalScore > 0)
+    .filter((item) => item.signals.length > 0)
     .sort((a, b) => b.totalScore - a.totalScore || (a.rank ?? 9999) - (b.rank ?? 9999))
     .slice(0, limit);
 

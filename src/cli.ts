@@ -15,6 +15,61 @@ import { makeId, nowIso } from "./util.js";
 import { getHnAiContext, getHnTopStories } from "./hn.js";
 import { buildRadarReportFromHn } from "./radar.js";
 
+/**
+ * Upper bounds for CLI integer options. Excessive values are rejected at
+ * option-parse time (before any HN/provider request) so a typo cannot trigger
+ * a large crawl or hundreds of HN requests.
+ */
+const MAX_AGE_MS_LIMIT = 31_536_000_000; // 1 year in ms
+const WAIT_FOR_MS_LIMIT = 300_000; // 5 minutes
+const HN_TOP_LIMIT = 500; // HN topstories returns at most 500 ids
+const RADAR_LIMIT_MAX = 500;
+const MAP_LIMIT_MAX = 1000;
+const CRAWL_LIMIT_MAX = 1000;
+const HN_AI_LIMIT_MAX = 100;
+const HN_NEIGHBORS_MAX = 100;
+
+const NON_NEGATIVE_INTEGER_PATTERN = /^\d+$/;
+
+/**
+ * Create a commander coercion that validates a full non-negative integer
+ * string within `[min, max]`. Rejects negatives, zero (when `min >= 1`),
+ * partial strings like `10foo`, and excessive values BEFORE any HN/provider
+ * request is issued.
+ *
+ * All CLI integer options are non-negative, so the regex deliberately omits a
+ * sign. Options where zero is a meaningful value (`--max-age 0` = force fresh,
+ * `--wait-for 0`, `--neighbors 0`) pass `min: 0`; count/limit options pass
+ * `min: 1` to reject zero.
+ */
+function createIntParser({ min, max }: { min: number; max: number }): (value: string) => number {
+  return (value: string): number => {
+    if (!NON_NEGATIVE_INTEGER_PATTERN.test(value)) {
+      throw new Error(`Invalid integer: ${value}`);
+    }
+    const parsed = Number.parseInt(value, 10);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new Error(`Integer out of range: ${value}`);
+    }
+    if (parsed < min) {
+      throw new Error(`Integer ${value} is below minimum ${min}`);
+    }
+    if (parsed > max) {
+      throw new Error(`Integer ${value} exceeds maximum ${max}`);
+    }
+    return parsed;
+  };
+}
+
+const parseMaxAgeMs = createIntParser({ min: 0, max: MAX_AGE_MS_LIMIT });
+const parseWaitForMs = createIntParser({ min: 0, max: WAIT_FOR_MS_LIMIT });
+const parseHnTop = createIntParser({ min: 1, max: HN_TOP_LIMIT });
+const parseRadarLimit = createIntParser({ min: 1, max: RADAR_LIMIT_MAX });
+const parseMapLimit = createIntParser({ min: 1, max: MAP_LIMIT_MAX });
+const parseCrawlLimit = createIntParser({ min: 1, max: CRAWL_LIMIT_MAX });
+const parseHnAiLimit = createIntParser({ min: 1, max: HN_AI_LIMIT_MAX });
+const parseHnNeighbors = createIntParser({ min: 0, max: HN_NEIGHBORS_MAX });
+
 const program = new Command();
 
 program
@@ -27,7 +82,7 @@ program
   .description("Scrape one URL and save raw JSON + markdown")
   .argument("<url>", "URL to scrape")
   .option("--json", "print full JSON instead of summary")
-  .option("--max-age <ms>", "Firecrawl maxAge in ms (omit to skip; 0 forces fresh)", parseInteger)
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (omit to skip; 0 forces fresh)", parseMaxAgeMs)
   .action(async (url: string, options: { json?: boolean; maxAge?: number }) => {
     const maxAgeMs = resolveContentMaxAge(options.maxAge);
     const provider = createFirecrawlProvider();
@@ -42,7 +97,7 @@ program
   .command("map")
   .description("Discover URLs on a site")
   .argument("<url>", "URL to map")
-  .option("--limit <number>", "max URLs to print", parseInteger, 50)
+  .option("--limit <number>", "max URLs to print", parseMapLimit, 50)
   .action(async (url: string, options: { limit: number }) => {
     const provider = createFirecrawlProvider();
     const links = (await provider.map(url)).slice(0, options.limit);
@@ -54,11 +109,11 @@ program
   .command("crawl")
   .description("Crawl a site and save documents")
   .argument("<url>", "URL to crawl")
-  .option("--limit <number>", "max pages", parseInteger, 10)
+  .option("--limit <number>", "max pages", parseCrawlLimit, 10)
   .option("--include <paths...>", "include path globs")
   .option("--exclude <paths...>", "exclude path globs")
-  .option("--wait-for <ms>", "wait before extraction", parseInteger)
-  .option("--max-age <ms>", "Firecrawl maxAge in ms for crawl scrapeOptions (omit to skip; 0 forces fresh)", parseInteger)
+  .option("--wait-for <ms>", "wait before extraction", parseWaitForMs)
+  .option("--max-age <ms>", "Firecrawl maxAge in ms for crawl scrapeOptions (omit to skip; 0 forces fresh)", parseMaxAgeMs)
   .action(async (url: string, options: { limit: number; include?: string[]; exclude?: string[]; waitFor?: number; maxAge?: number }) => {
     const provider = createFirecrawlProvider();
     const store = createFileStore();
@@ -98,7 +153,7 @@ program
   .description("Scrape one URL and extract into a built-in schema")
   .argument("<url>", "URL to extract from")
   .option("--schema <name>", "built-in schema name: article", "article")
-  .option("--max-age <ms>", "Firecrawl maxAge in ms (omit to skip; 0 forces fresh)", parseInteger)
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (omit to skip; 0 forces fresh)", parseMaxAgeMs)
   .action(async (url: string, options: { schema: string; maxAge?: number }) => {
     if (options.schema !== "article") throw new Error(`Unknown schema: ${options.schema}`);
     const maxAgeMs = resolveContentMaxAge(options.maxAge);
@@ -118,7 +173,7 @@ program
   .argument("<url>", "URL to extract from")
   .option("--schema <name>", "built-in schema: article | web-research", "web-research")
   .option("--prompt <text>", "extraction instruction", "Extract only facts explicitly supported by the page. Include evidence and source URLs when available.")
-  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseInteger)
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseMaxAgeMs)
   .action(async (url: string, options: { schema: string; prompt: string; maxAge?: number }) => {
     if (options.schema === "fact-check") {
       throw new Error(
@@ -147,8 +202,8 @@ program
 program
   .command("radar-hn")
   .description("Collect broad HN radar signals without editorial filtering")
-  .option("--top <number>", "HN top stories to inspect", parseInteger, 120)
-  .option("--limit <number>", "radar items to return", parseInteger, 20)
+  .option("--top <number>", "HN top stories to inspect", parseHnTop, 120)
+  .option("--limit <number>", "radar items to return", parseRadarLimit, 20)
   .action(async (options: { top: number; limit: number }) => {
     const stories = await getHnTopStories(options.top);
     const report = buildRadarReportFromHn(stories, options.limit);
@@ -159,9 +214,9 @@ program
 program
   .command("hn-ai")
   .description("Fetch top AI stories from Hacker News plus same-frontpage context")
-  .option("--top <number>", "HN top stories to inspect", parseInteger, 120)
-  .option("--limit <number>", "AI stories to return", parseInteger, 3)
-  .option("--neighbors <number>", "same-frontpage neighbor stories to include", parseInteger, 12)
+  .option("--top <number>", "HN top stories to inspect", parseHnTop, 120)
+  .option("--limit <number>", "AI stories to return", parseHnAiLimit, 3)
+  .option("--neighbors <number>", "same-frontpage neighbor stories to include", parseHnNeighbors, 12)
   .action(async (options: { top: number; limit: number; neighbors: number }) => {
     const context = await getHnAiContext({
       topStoriesLimit: options.top,
@@ -179,7 +234,7 @@ program
   .option("--url <urls...>", "optional URLs to focus the agent")
   .option("--schema <name>", "built-in schema: article | web-research", "web-research")
   .option("--model <name>", "Firecrawl Spark model: spark-1-mini | spark-1-pro", "spark-1-mini")
-  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseInteger)
+  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseMaxAgeMs)
   .action(async (prompt: string, options: { url?: string[]; schema: string; model: string; maxAge?: number }) => {
     if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
     if (options.model !== "spark-1-mini" && options.model !== "spark-1-pro") throw new Error(`Unknown model: ${options.model}`);
@@ -239,12 +294,6 @@ async function saveRun(command: string, input: Record<string, unknown>, output: 
     createdAt: nowIso(),
   };
   await store.saveRun(record);
-}
-
-function parseInteger(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) throw new Error(`Invalid integer: ${value}`);
-  return parsed;
 }
 
 /**
