@@ -10,6 +10,7 @@ import {
   isBuiltInExtractionSchemaName,
   parseBuiltInExtraction,
 } from "./schemas/registry.js";
+import { validateSourceGateFile } from "./schemas/source-gate.js";
 import { makeId, nowIso } from "./util.js";
 import { getHnAiContext, getHnTopStories } from "./hn.js";
 import { buildRadarReportFromHn } from "./radar.js";
@@ -94,6 +95,14 @@ program
   .option("--schema <name>", "built-in schema: article | web-research", "web-research")
   .option("--prompt <text>", "extraction instruction", "Extract only facts explicitly supported by the page. Include evidence and source URLs when available.")
   .action(async (url: string, options: { schema: string; prompt: string }) => {
+    if (options.schema === "fact-check") {
+      throw new Error(
+        "extract-ai --schema fact-check is deprecated for single-page usage.\n" +
+          "Migration: use `agent` for multi-page source-gate extraction, or wait for the future `research` command.\n" +
+          "The canonical source sufficiency gate contract now lives in src/schemas/source-gate.ts.\n" +
+          "Validate a gate result JSON file with: scrape-agent source-gate --validate <file.json>.",
+      );
+    }
     if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
     const result = await scrapeFirecrawlStructured({
       url,
@@ -158,6 +167,30 @@ program
     await store.saveExtraction(`agent-${options.schema}-${makeId("result")}`, parsed);
     await saveRun("agent", { prompt, urls: options.url ?? [], schema: options.schema, model: options.model }, { result: parsed });
     print(parsed);
+  });
+
+program
+  .command("source-gate")
+  .description("Source sufficiency gate: validate a source-gate result JSON file before linters run")
+  .option("--validate <file>", "validate a source-gate result JSON file and print the parsed result")
+  .action(async (options: { validate?: string }) => {
+    if (!options.validate) {
+      throw new Error(
+        "source-gate requires --validate <file.json>. " +
+          "Produce a gate result via scripts/fact-check.sh (see prompts/fact-check.md), then validate it here.",
+      );
+    }
+    const result = validateSourceGateFile(options.validate);
+    if (!result.pass) {
+      throw new Error(
+        `Source sufficiency gate BLOCKED: pass=false, diagnosisAllowed=false. ` +
+          `Found ${result.anchors.length} anchors (sensitive: ${result.sensitiveCategories.length > 0}).`,
+      );
+    }
+    if (!result.diagnosisAllowed) {
+      throw new Error("Source sufficiency gate BLOCKED: diagnosisAllowed=false despite pass=true.");
+    }
+    print(result);
   });
 
 program.parseAsync(process.argv).catch((error: unknown) => {
