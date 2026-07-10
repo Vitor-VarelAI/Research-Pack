@@ -1,5 +1,17 @@
 import { z } from "zod";
 
+/**
+ * DEPRECATED for single-page usage as of RP-01.
+ *
+ * `extract-ai --schema fact-check` now refuses to run and prints a migration
+ * message. The canonical source sufficiency gate contract lives in
+ * `src/schemas/source-gate.ts` (SourceGateResultSchema). This schema is kept
+ * only for backwards-compatible JSON shape references and future `agent` /
+ * `research` multi-page flows that may still emit this shape.
+ *
+ * Do not use this schema for new single-page fact-check extraction.
+ */
+
 export const FactCheckAnchorSchema = z.object({
   sourceName: z.string().min(1),
   sourceUrl: z.string().url(),

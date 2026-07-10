@@ -36,6 +36,20 @@ describe("CLI smoke tests", () => {
     assert.equal(payload.aiStories[0]?.id, 101);
     assert.equal(payload.sameFrontpage.length, 2);
   });
+
+  it("deprecates extract-ai --schema fact-check with a migration message", () => {
+    const result = runCli(["extract-ai", "https://example.com", "--schema", "fact-check"]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /deprecated for single-page usage/);
+    assert.match(result.stderr, /Migration: use `agent`/);
+    assert.match(result.stderr, /source-gate --validate/);
+  });
+
+  it("exposes source-gate command in top-level help", () => {
+    const result = runCli(["--help"]);
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /source-gate/);
+  });
 });
 
 function runCli(args: string[], options: { mockHn?: boolean } = {}): { status: number | null; stdout: string; stderr: string } {

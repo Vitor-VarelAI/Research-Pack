@@ -4,25 +4,26 @@ This file is updated by the coordinator only.
 
 ## Current phase
 
-Phase: RP-00 Baseline and test infrastructure
-Issue: #3
-Branch: `agent/rp-00-baseline`
-PR: #4
-Status: Draft PR open; pending review/merge
-Base SHA: `b2b63fd08d862a0e6b4302e9f483f1940badf055`
+Phase: RP-01 Source gate and fact-check contract
+Issue: #5
+Branch: `agent/rp-01-source-gate`
+PR: #6
+Status: changes requested; blocking invariant fix validated locally; pending push/re-review
+Base SHA: `437afc76eab5a2315e0017ec66eaaa43cc484f99`
 
 ## Completed phases
 
 | Phase | Issue | PR | Checkpoint | Status |
 | --- | --- | --- | --- | --- |
 | RP-GOV | #1 | #2 | `checkpoint/rp-gov-governance` | merged |
+| RP-00 | #3 | #4 | `checkpoint/rp-00-baseline` | merged |
 
 ## Planned phases
 
 | Phase | Title | Status |
 | --- | --- | --- |
-| RP-00 | Baseline and test infrastructure | in progress |
-| RP-01 | Source gate and fact-check contract | not started |
+| RP-00 | Baseline and test infrastructure | completed |
+| RP-01 | Source gate and fact-check contract | in progress |
 | RP-02 | Freshness, cache and provenance | not started |
 | RP-03 | Crawl pagination | not started |
 | RP-04 | Radar and CLI validation | not started |
@@ -38,4 +39,4 @@ Base SHA: `b2b63fd08d862a0e6b4302e9f483f1940badf055`
 
 ## Last checkpoint
 
-`main` at `b2b63fd08d862a0e6b4302e9f483f1940badf055` after RP-GOV merge and checkpoint tag.
+`main` at `437afc76eab5a2315e0017ec66eaaa43cc484f99` after RP-00 merge and checkpoint tag.
