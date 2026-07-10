@@ -4,22 +4,24 @@ This file is updated by the coordinator only.
 
 ## Current phase
 
-Phase: RP-GOV Governance and auditability
-Issue: #1
-Branch: `agent/rp-minus-1-governance`
-PR: #2
+Phase: RP-00 Baseline and test infrastructure
+Issue: #3
+Branch: `agent/rp-00-baseline`
+PR: #4
 Status: Draft PR open; pending review/merge
-Base SHA: `e89a4b47d80a07f2efeddb10ec0c3dafe865a7f3`
+Base SHA: `b2b63fd08d862a0e6b4302e9f483f1940badf055`
 
 ## Completed phases
 
-None yet.
+| Phase | Issue | PR | Checkpoint | Status |
+| --- | --- | --- | --- | --- |
+| RP-GOV | #1 | #2 | `checkpoint/rp-gov-governance` | merged |
 
 ## Planned phases
 
 | Phase | Title | Status |
 | --- | --- | --- |
-| RP-00 | Baseline and test infrastructure | not started |
+| RP-00 | Baseline and test infrastructure | in progress |
 | RP-01 | Source gate and fact-check contract | not started |
 | RP-02 | Freshness, cache and provenance | not started |
 | RP-03 | Crawl pagination | not started |
@@ -31,9 +33,9 @@ None yet.
 
 ## Active risks
 
-- GitHub Issues, PRs, branch protection and remote tags have not been created yet.
+- GitHub branch protection has not been configured yet.
 - Private context is currently local-only unless Vitor creates a separate private context repository.
 
 ## Last checkpoint
 
-`main` at `e89a4b47d80a07f2efeddb10ec0c3dafe865a7f3` before RP-GOV changes.
+`main` at `b2b63fd08d862a0e6b4302e9f483f1940badf055` after RP-GOV merge and checkpoint tag.
