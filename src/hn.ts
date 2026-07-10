@@ -30,6 +30,25 @@ export type HnStory = z.infer<typeof HnStorySchema>;
 
 const HN_API_BASE = process.env.HN_API_BASE ?? "https://hacker-news.firebaseio.com/v0";
 
+/**
+ * Maximum number of concurrent HN item requests. The HN Firebase API is
+ * fetched one item at a time per top-story id; without a cap, `--top 120`
+ * would fire 120 simultaneous requests. The cap defaults to 8 and can be
+ * overridden via the `HN_CONCURRENCY` env var (clamped to 1..50).
+ */
+const HN_CONCURRENCY_DEFAULT = 8;
+const HN_CONCURRENCY_MAX = 50;
+
+export function resolveHnConcurrency(): number {
+  const env = process.env.HN_CONCURRENCY;
+  if (env !== undefined && env !== "") {
+    if (!/^\d+$/.test(env)) return HN_CONCURRENCY_DEFAULT;
+    const n = Number.parseInt(env, 10);
+    if (Number.isSafeInteger(n) && n >= 1 && n <= HN_CONCURRENCY_MAX) return n;
+  }
+  return HN_CONCURRENCY_DEFAULT;
+}
+
 const AI_SIGNAL_PATTERNS: Record<string, RegExp> = {
   ai: /\bAI\b|artificial intelligence/i,
   llm: /\bLLM\b|language model/i,
@@ -46,6 +65,8 @@ export type HnAiContextOptions = {
   topStoriesLimit: number;
   aiStoriesLimit: number;
   neighborLimit: number;
+  /** Optional HN request concurrency cap (defaults to resolveHnConcurrency()). */
+  concurrency?: number;
 };
 
 export type HnAiContext = {
@@ -59,17 +80,20 @@ export type HnAiContext = {
   }>;
 };
 
-export async function getHnTopStories(limit: number): Promise<HnStory[]> {
+export async function getHnTopStories(limit: number, concurrency: number = resolveHnConcurrency()): Promise<HnStory[]> {
   const ids = await getJson<number[]>(hnApiUrl("topstories.json"));
   const limitedIds = ids.slice(0, limit);
-  const items = await Promise.all(limitedIds.map((id, index) => getHnItem(id).then((item) => ({ item, rank: index + 1 }))));
-  return items
+  const entries = await mapWithConcurrency(limitedIds, concurrency, async (id, index) => {
+    const item = await getHnItem(id);
+    return { item, rank: index + 1 };
+  });
+  return entries
     .filter(({ item }) => item.type === "story" && !item.deleted && !item.dead && item.title)
     .map(({ item, rank }) => toStory(item, rank));
 }
 
 export async function getHnAiContext(options: HnAiContextOptions): Promise<HnAiContext> {
-  const stories = await getHnTopStories(options.topStoriesLimit);
+  const stories = await getHnTopStories(options.topStoriesLimit, options.concurrency ?? resolveHnConcurrency());
 
   const aiStories = stories.filter((story) => story.aiSignals.length > 0).slice(0, options.aiStoriesLimit);
   const sameFrontpage = stories.slice(0, options.neighborLimit);
@@ -123,6 +147,31 @@ function buildSameBoard(aiStories: HnStory[], sameFrontpage: HnStory[]): HnAiCon
 
 async function getHnItem(id: number): Promise<HnItem> {
   return HnItemSchema.parse(await getJson<unknown>(hnApiUrl(`item/${id}.json`)));
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` concurrent invocations, preserving
+ * input order in the result array. The concurrency cap is the security/cost
+ * control tested by RP-04: the maximum number of in-flight HN requests must
+ * never exceed `limit`.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  if (items.length === 0) return results;
+  const safeLimit = Math.max(1, Math.min(limit, items.length));
+  let cursor = 0;
+  async function worker(): Promise<void> {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index]!, index);
+    }
+  }
+  await Promise.all(Array.from({ length: safeLimit }, () => worker()));
+  return results;
 }
 
 function hnApiUrl(path: string): string {
