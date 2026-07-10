@@ -1,0 +1,97 @@
+name: Agent phase
+description: Contract for one Research-Pack agent phase
+title: "RP-XX: <phase title>"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this issue as the phase contract. Keep decisions and blockers here or in the linked PR, not only in chat.
+  - type: input
+    id: phase
+    attributes:
+      label: Phase
+      description: Example RP-01 Source gate and fact-check contract
+      placeholder: RP-XX ...
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: What this phase must accomplish.
+    validations:
+      required: true
+  - type: textarea
+    id: in_scope
+    attributes:
+      label: In scope
+      description: Files, commands, behaviours and tests included in this phase.
+    validations:
+      required: true
+  - type: textarea
+    id: out_of_scope
+    attributes:
+      label: Out of scope
+      description: Explicit non-goals. Workers must stop before expanding beyond this.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Prior phases, handoffs, ADRs, docs or external contracts required before work starts.
+    validations:
+      required: true
+  - type: textarea
+    id: required_tests
+    attributes:
+      label: Required tests and commands
+      description: Exact commands and behaviours that must pass before completion.
+      placeholder: |
+        - npm test
+        - npm run typecheck
+        - npm run build
+        - bash -n scripts/*.sh
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and privacy constraints
+      value: |
+        - Do not print, commit or store API keys, tokens, private drafts or personal context.
+        - Do not modify .env, data/, profiles/editorial/soul.md or profiles/editorial/voice.md.
+        - Use local mocks in tests. Do not call paid providers.
+        - Do not use git reset, checkout --, stash or destructive cleanup commands.
+        - Do not push or deploy without explicit authorization.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Concrete checklist the coordinator will use before merge.
+    validations:
+      required: true
+  - type: textarea
+    id: handoff
+    attributes:
+      label: Required handoff
+      description: Expected docs/agents/runs/<run>.md entry and metadata.
+      value: |
+        Handoff must include metadata, summary, files changed, decisions, tests and results, risks, remaining work and rollback instructions.
+    validations:
+      required: true
+  - type: checkboxes
+    id: coordinator_checklist
+    attributes:
+      label: Coordinator checklist
+      options:
+        - label: Issue scope is clear and bounded.
+        - label: Branch/worktree created from latest main.
+        - label: Draft PR linked to this issue.
+        - label: Handoff reviewed.
+        - label: CI and required local tests passed.
+        - label: No protected/private files or secrets changed.
+        - label: Scope creep rejected or moved to a new issue.
+        - label: Squash merge and checkpoint tag planned.
