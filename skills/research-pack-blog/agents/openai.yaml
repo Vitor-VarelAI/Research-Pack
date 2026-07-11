@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Pack Blog"
+  short_description: "Turn research packs into publishable posts"
+  default_prompt: "Use $research-pack-blog to turn this diagnose into a publishable blog post."

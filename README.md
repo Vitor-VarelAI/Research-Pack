@@ -90,12 +90,17 @@ profiles/radar/criteria.md  Radar collection criteria
 profiles/editorial/research-pack.md  Multi-source research pack format
 profiles/editorial/fact-check.md  Minimum source anchors before diagnosis
 profiles/editorial/diagnose.md  Strategic diagnosis format
+profiles/editorial/blog-post.md  Final blog/newsletter formats
+profiles/editorial/blog-publish-check.md  Pre-publish editorial and SEO gate
+skills/research-pack-blog/SKILL.md  Project-local blog conversion/publish skill
 ```
 
 ## Next steps
 
 - Add `research "topic"` command that outputs `profiles/editorial/research-pack.md` format.
 - Add `diagnose <research-pack.md>` command that outputs `profiles/editorial/diagnose.md` format.
+- Add `blog <diagnose.md>` command that outputs `profiles/editorial/blog-post.md` format.
+- Add `publish-check <post.md>` command that outputs `profiles/editorial/blog-publish-check.md` format.
 - Add a first-class `angle`/`diagnose-news` CLI command.
 - Expand `profiles/radar/` into source-specific radar profiles.
 - Add profile folders for `ads`, `design-md`, `motion`, etc.
