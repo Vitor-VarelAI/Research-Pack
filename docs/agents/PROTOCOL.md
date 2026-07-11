@@ -39,46 +39,89 @@ Worker rules:
 
 ## Model routing
 
-The goal is to use the cheapest model that can reliably meet the bar, while protecting premium quota for decisions where quality or risk matters.
+The coordinator should spend tokens on orchestration, repository state,
+scope control, final judgment and integration. Implementation, review,
+linting, comparison and other separable work should be delegated to `pi`
+subagents when it is useful.
+
+Rationale:
+
+- Vitor already pays for the relevant API usage through `pi`.
+- Subagents let the coordinator do less token-heavy execution work and more
+  control work.
+- Independent workers can run in parallel, which helps move several project
+  slices at once.
+- Explicit worker prompts and handoffs keep the process auditable.
+- Model choice stays controlled instead of depending on whatever the current
+  coordinator runtime happens to be.
+
+Default runtime:
+
+- Use `pi` for workers, reviewers and independent second opinions.
+- Do not use Hermes for new work unless Vitor explicitly asks for it.
+- Treat prior Hermes instructions in this document or older handoffs as legacy
+  context only.
+- Record `agent_runtime: pi` and model metadata in handoffs whenever available.
+
+Allowed worker/reviewer models:
+
+- `zai/glm-5.2`
+- `deepseek/deepseek-v4-pro`
+
+Do not use OpenGo/OpenCode models, GPT review models, Qwen, Claude/Fable/Opus/
+Sonnet, or DeepSeek Flash for this project unless Vitor explicitly changes the
+allowed set.
 
 Default routing:
 
 | Role or task | Preferred model |
 | --- | --- |
-| Coordinator / final phase planning | `fable-5` or `opus-4.8` |
-| Default implementation worker | `glm-5.2` |
-| Bulk/mechanical edits, migrations, data analysis, bug hunts | `deepseek-v4-pro` |
-| Long-context docs or sustained implementation loops | `minimax-m3` |
-| Taste-heavy API naming, prompts, UX, copy, editorial output | `kimi-k2.6` |
-| Independent second opinion | `qwen3.7-max` |
-| First-pass review gate for non-trivial shipping diffs | `gpt-5.5` |
-| Final arbiter for flagged/high-risk items | `fable-5` or `opus-4.8` |
+| Coordinator / final phase planning | Current Codex coordinator |
+| Default implementation worker | `zai/glm-5.2` via `pi` |
+| Bulk/mechanical edits, migrations, data analysis, bug hunts | `deepseek/deepseek-v4-pro` via `pi` |
+| Long-context docs or sustained implementation loops | `zai/glm-5.2` via `pi` |
+| Taste-heavy prompts, UX, copy or editorial output | `zai/glm-5.2` via `pi`, then coordinator final pass |
+| Independent second opinion | `deepseek/deepseek-v4-pro` via `pi` |
+| Review gate for non-trivial shipping diffs | `deepseek/deepseek-v4-pro` via `pi` |
+| Final arbiter for flagged/high-risk items | Current Codex coordinator, with Vitor decision if needed |
 
 Phase guidance:
 
-- RP-00 to RP-04: `glm-5.2` or `deepseek-v4-pro` may implement; `gpt-5.5` reviews non-trivial diffs.
-- RP-05 and RP-06: `gpt-5.5` review is mandatory; escalate security, cost, credential, process, and storage risks to `fable-5` or `opus-4.8`.
-- RP-07: medium-cost models are acceptable, but CI and metadata changes still need review.
-- RP-08: use a strong implementation model plus taste/editorial review with `kimi-k2.6`, `fable-5`, or `opus-4.8` when output format, prompt quality, or public wording changes.
+- RP-00 to RP-04: historical phases may mention older routing in handoffs; do
+  not reuse that routing for new work.
+- RP-05 and later: use `pi` workers/reviewers with `zai/glm-5.2` or
+  `deepseek/deepseek-v4-pro`.
+- Security, cost, credential, process and storage risks require a separate
+  `pi` review before coordinator approval.
+- Editorial output, prompt quality and public wording changes should get a
+  `pi` taste/structure pass when the diff is non-trivial.
 
 Review path:
 
 1. Worker summarizes changed files, test results, risks, and open questions.
 2. Coordinator gathers the actual diff.
-3. `gpt-5.5` reviews non-trivial shipping diffs and returns verdict, flagged sections, concerns, and escalation recommendation.
-4. If flagged or high-risk, `fable-5` or `opus-4.8` reviews only the summary, flagged sections, touched file list, and test output unless more context is needed.
-5. Taste-sensitive diffs may skip GPT first-pass and go directly to `kimi-k2.6`, `fable-5`, or `opus-4.8`.
-6. The handoff must state which review path was used. Do not silently skip review.
+3. A `pi` reviewer using `deepseek/deepseek-v4-pro` reviews non-trivial
+   shipping diffs and returns verdict, flagged sections, concerns and
+   escalation recommendation.
+4. If flagged or high-risk, run a second focused `pi` pass with the smallest
+   needed context: summary, touched files, flagged sections and test output.
+5. Taste-sensitive diffs may use `zai/glm-5.2` for structure/voice and
+   `deepseek/deepseek-v4-pro` for adversarial review.
+6. The handoff must state which review path was used. Do not silently skip
+   review.
 
-Hermes invocation pattern from this repo:
+Pi invocation guidance:
 
-```bash
-hermes -z "<task prompt>" -m <model> --cwd /home/vitor/projects/scrape-agent
+```text
+Use a pi worker/reviewer with:
+- the exact assigned branch/worktree
+- the Issue or task prompt
+- relevant handoff(s), ADR(s), and touched files
+- explicit model request: zai/glm-5.2 or deepseek/deepseek-v4-pro
 ```
 
-For true per-task routing, spawn a separate Hermes child process with an explicit `-m <model>` flag. Do not rely on delegation mechanisms that inherit the parent model when the task requires a specific model.
-
-Hard ban: never use DeepSeek V4 Flash. If a DeepSeek model is needed, use `deepseek-v4-pro`.
+Hard ban: never use DeepSeek V4 Flash. If a DeepSeek model is needed, use
+`deepseek/deepseek-v4-pro`.
 
 ## Branch, PR and tag naming
 
@@ -148,8 +191,9 @@ issue: 2
 pr: 3
 base_sha: abc123
 tested_sha: def456
-agent_runtime: codex
-model_requested: unknown
+agent_runtime: pi
+agent_profile: unknown
+model_requested: zai/glm-5.2
 model_reported: unknown
 reasoning_effort: high
 token_usage: null
@@ -159,7 +203,8 @@ private_context_ref: local-files@unknown
 status: completed
 ```
 
-Use `unknown` when the runtime does not expose a value. Do not guess.
+Use `unknown` when the runtime does not expose a value. Do not guess. If a
+named `pi` profile is used, such as `Earnest`, record it in `agent_profile`.
 
 Required sections:
 
