@@ -1,7 +1,7 @@
 ---
 run_id: RP-05-20260711
 issue: 15
-pr: pending
+pr: 16
 base_sha: 3ffafb0d060ed6c5c04be3bbd4b2ee6200cf5277
 agent_runtime: codex
 model_requested: unknown
@@ -11,7 +11,7 @@ token_usage: null
 prompt_path: docs/agents/prompts/rp-05-resilience-costs.md
 private_context_consulted: false
 private_context_ref: none
-status: local_complete_pending_pr_review
+status: draft_pr_open_pending_review
 ---
 
 ## Summary
@@ -72,8 +72,6 @@ git diff --check
 
 ## Remaining work
 
-- Push branch `agent/rp-05-resilience-costs`.
-- Open Draft PR for Issue #15.
 - Request external review using only `zai/glm-5.2` or `deepseek/deepseek-v4-pro`.
 - After approval, squash merge and tag `checkpoint/rp-05-resilience-costs`.
 

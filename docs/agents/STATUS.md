@@ -7,8 +7,8 @@ This file is updated by the coordinator only.
 Phase: RP-05 HTTP resilience and cost controls
 Issue: #15
 Branch: `agent/rp-05-resilience-costs`
-PR: pending
-Status: Local implementation complete; pending Draft PR and external review
+PR: #16
+Status: Draft PR open; pending external review
 Base SHA: `3ffafb0d060ed6c5c04be3bbd4b2ee6200cf5277`
 
 ## Completed phases
