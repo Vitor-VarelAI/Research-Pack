@@ -11,7 +11,7 @@ token_usage: null
 prompt_path: docs/agents/prompts/rp-05-resilience-costs.md
 private_context_consulted: false
 private_context_ref: none
-status: draft_pr_open_pending_review
+status: draft_pr_open_external_review_approved
 ---
 
 ## Summary
@@ -59,7 +59,7 @@ git diff --check
 
 - `npm ci`: installed cleanly in the new worktree.
 - `npm run typecheck`: passed.
-- `npm test`: passed with exit code 0 (`107` tests, `107` pass).
+- `npm test`: passed with exit code 0 (`113` tests, `113` pass).
 - `npm run build`: passed.
 - `bash -n scripts/*.sh`: passed.
 - `git diff --check`: passed.
@@ -70,9 +70,16 @@ git diff --check
 - `/agent` provenance records the requested freshness policy, but Firecrawl may not enforce it internally because top-level `maxAge` is not accepted by that endpoint.
 - Timeout is per HTTP request, not a full command deadline. Existing crawl/agent poll deadlines still bound long-running jobs separately.
 
+## External review
+
+- Runtime: `pi` subagent
+- Agent type: `Plan`
+- Model: `deepseek/deepseek-v4-pro`
+- Verdict: `APPROVE`
+- Summary: no blocking issues; RP-02 provenance and RP-03 same-origin crawl pagination contracts preserved. Initial coverage notes for transient statuses and env config were addressed with additional tests before final push.
+
 ## Remaining work
 
-- Request external review using only `zai/glm-5.2` or `deepseek/deepseek-v4-pro`.
 - After approval, squash merge and tag `checkpoint/rp-05-resilience-costs`.
 
 ## Rollback instructions
