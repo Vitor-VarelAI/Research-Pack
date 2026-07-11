@@ -16,11 +16,15 @@ const mockFirecrawlPath = path.join(repoRoot, "tests", "fixtures", "mock-firecra
 
 type CapturedRequest = { url: string; body: unknown };
 
-function installCaptureMock(options: { cache?: "cached" | "fresh" | "none"; scrapedAt?: string } = {}): { requests: CapturedRequest[]; restore: () => void } {
+function installCaptureMock(options: { cache?: "cached" | "fresh" | "none"; cacheState?: string; metadataCacheState?: string; scrapedAt?: string } = {}): { requests: CapturedRequest[]; restore: () => void } {
   const requests: CapturedRequest[] = [];
   const original = globalThis.fetch;
   const cache = options.cache ?? "none";
-  const cacheFields = cache === "cached" ? { fromCache: true, cacheState: "hit" } : cache === "fresh" ? { fromCache: false, cacheState: "miss" } : {};
+  const cacheFields = options.cacheState !== undefined
+    ? { cacheState: options.cacheState }
+    : cache === "cached" ? { fromCache: true, cacheState: "hit" }
+    : cache === "fresh" ? { fromCache: false, cacheState: "miss" }
+    : {};
   const scrapedAt = options.scrapedAt ?? "2026-07-10T00:00:00.000Z";
 
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -36,7 +40,12 @@ function installCaptureMock(options: { cache?: "cached" | "fresh" | "none"; scra
           markdown: "# Mocked",
           html: "<p>Mocked</p>",
           links: ["https://example.com/a"],
-          metadata: { sourceURL: "https://example.com/page", title: "Mocked", scrapedAt },
+          metadata: {
+            sourceURL: "https://example.com/page",
+            title: "Mocked",
+            scrapedAt,
+            ...(options.metadataCacheState !== undefined ? { cacheState: options.metadataCacheState } : {}),
+          },
           json: { answer: "x", facts: [], sources: [], confidence: "medium" },
         },
       });
@@ -88,10 +97,10 @@ describe("Firecrawl maxAge payload", () => {
     assert.equal(body.maxAge, 0);
   });
 
-  it("agent sends maxAge in payload and returns provenance", async () => {
+  it("agent omits maxAge from Firecrawl payload but returns requested freshness provenance", async () => {
     const result = await runFirecrawlAgent({ prompt: "p", schema: {}, model: "spark-1-mini", maxAgeMs: 0 }, { apiKey: "test-key" });
     const body = requests[0]?.body as Record<string, unknown>;
-    assert.equal(body.maxAge, 0);
+    assert.equal("maxAge" in body, false);
     assert.equal(result.provenance.maxAgeMs, 0);
     assert.ok(typeof result.provenance.requestedAt === "string" && result.provenance.requestedAt.length > 0);
   });
@@ -148,6 +157,30 @@ describe("provenance distinguishes requested/provider/cache", () => {
       assert.equal(doc.provenance.cacheState, "unknown");
       assert.equal(doc.provenance.cacheStatus, null);
       assert.equal(doc.provenance.maxAgeMs, null);
+    } finally {
+      restore();
+    }
+  });
+
+  it("unrecognized top-level cacheState remains unknown", async () => {
+    const { restore } = installCaptureMock({ cacheState: "revalidated" });
+    try {
+      const provider = createFirecrawlProvider({ apiKey: "test-key" });
+      const doc = await provider.scrape("https://example.com/page");
+      assert.equal(doc.provenance.cacheState, "unknown");
+      assert.equal(doc.provenance.cacheStatus, "revalidated");
+    } finally {
+      restore();
+    }
+  });
+
+  it("unrecognized metadata cacheState remains unknown", async () => {
+    const { restore } = installCaptureMock({ metadataCacheState: "edge-cache" });
+    try {
+      const provider = createFirecrawlProvider({ apiKey: "test-key" });
+      const doc = await provider.scrape("https://example.com/page");
+      assert.equal(doc.provenance.cacheState, "unknown");
+      assert.equal(doc.provenance.cacheStatus, "edge-cache");
     } finally {
       restore();
     }
@@ -281,7 +314,7 @@ describe("CLI research/fact-check maxAge default", () => {
     }
   });
 
-  it("agent defaults to maxAge:0 in the Firecrawl payload", () => {
+  it("agent omits maxAge from Firecrawl payload", () => {
     const recordFile = path.join(mkdtempSync(path.join(tmpdir(), "cli-rec-")), "record.json");
     const dataDir = mkdtempSync(path.join(tmpdir(), "cli-data-"));
     try {
@@ -304,7 +337,7 @@ describe("CLI research/fact-check maxAge default", () => {
       const recorded = JSON.parse(readFileSync(recordFile, "utf8")) as Array<{ url: string; body: Record<string, unknown> }>;
       const agentReq = recorded.find((r) => r.url.endsWith("/agent"));
       assert.ok(agentReq, "an agent request must have been made");
-      assert.equal(agentReq.body.maxAge, 0);
+      assert.equal("maxAge" in agentReq.body, false);
     } finally {
       rmSync(path.dirname(recordFile), { recursive: true, force: true });
       rmSync(dataDir, { recursive: true, force: true });

@@ -4,12 +4,12 @@ This file is updated by the coordinator only.
 
 ## Current phase
 
-Phase: RP-04 Radar and CLI validation
-Issue: #12
-Branch: `agent/rp-04-radar-cli`
-PR: #13
-Status: Draft PR open; pending external review
-Base SHA: `34c0e75b64dfbc05360904d9eb892b220d3955fd`
+Phase: RP-05 HTTP resilience and cost controls
+Issue: #15
+Branch: `agent/rp-05-resilience-costs`
+PR: pending
+Status: Local implementation complete; pending Draft PR and external review
+Base SHA: `3ffafb0d060ed6c5c04be3bbd4b2ee6200cf5277`
 
 ## Completed phases
 
@@ -20,6 +20,7 @@ Base SHA: `34c0e75b64dfbc05360904d9eb892b220d3955fd`
 | RP-01 | #5 | #6 | `checkpoint/rp-01-source-gate` | merged |
 | RP-02 | #7 | #8 | `checkpoint/rp-02-provenance` | merged |
 | RP-03 | #9 | #11 | `checkpoint/rp-03-crawl-pagination` | merged |
+| RP-04 | #12 | #13 | `checkpoint/rp-04-radar-cli` | merged |
 
 ## Planned phases
 
@@ -29,8 +30,8 @@ Base SHA: `34c0e75b64dfbc05360904d9eb892b220d3955fd`
 | RP-01 | Source gate and fact-check contract | completed |
 | RP-02 | Freshness, cache and provenance | completed |
 | RP-03 | Crawl pagination | completed |
-| RP-04 | Radar and CLI validation | in progress |
-| RP-05 | HTTP resilience and cost controls | not started |
+| RP-04 | Radar and CLI validation | completed |
+| RP-05 | HTTP resilience and cost controls | in progress |
 | RP-06 | VPS operational security | not started |
 | RP-07 | CI, metadata and documentation | not started |
 | RP-08 | Public research to diagnose workflow | not started |
@@ -42,4 +43,4 @@ Base SHA: `34c0e75b64dfbc05360904d9eb892b220d3955fd`
 
 ## Last checkpoint
 
-`main` at `34c0e75b64dfbc05360904d9eb892b220d3955fd` after RP-03 merge and checkpoint tag.
+`main` at `3ffafb0d060ed6c5c04be3bbd4b2ee6200cf5277` after RP-04 merge and checkpoint tag.

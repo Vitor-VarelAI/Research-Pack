@@ -77,7 +77,8 @@ path; the temp file is removed best-effort on failure.
 - Future phases (RP-03 crawl, RP-05 resilience/costs) must preserve the
   provenance contract and the atomic-write guarantee when adding storage or
   retry behaviour.
-- The Firecrawl `/agent` endpoint's handling of `maxAge` is best-effort:
-  the value is sent in the payload, but the agent's internal page fetches
-  may not honour it. This is recorded in the agent run input and result
-  provenance.
+- The Firecrawl `/agent` endpoint does not accept the same top-level `maxAge`
+  field as `/scrape`; RP-05 removed that key from `/agent` payloads after a
+  live 400 response. The command still records the requested freshness policy
+  in run input and result provenance, but the provider may not enforce it for
+  the agent's internal page fetches.
