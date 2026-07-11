@@ -11,7 +11,7 @@ token_usage: null
 prompt_path: docs/agents/prompts/rp-05-resilience-costs.md
 private_context_consulted: false
 private_context_ref: none
-status: draft_pr_open_external_review_approved
+status: pr_ready_external_review_approved
 ---
 
 ## Summary

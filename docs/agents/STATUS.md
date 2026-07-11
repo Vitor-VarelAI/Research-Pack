@@ -8,7 +8,7 @@ Phase: RP-05 HTTP resilience and cost controls
 Issue: #15
 Branch: `agent/rp-05-resilience-costs`
 PR: #16
-Status: Draft PR open; external review approved; pending human merge authorization
+Status: PR ready; external review approved; pending human merge authorization
 Base SHA: `3ffafb0d060ed6c5c04be3bbd4b2ee6200cf5277`
 
 ## Completed phases
