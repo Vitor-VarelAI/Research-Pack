@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "slug": "editorial-package",
+  "locale": "pt-PT",
+  "publishedOn": "2026-03-01",
+  "title": "O sinal por trás do lançamento",
+  "description": "Uma leitura editorial sobre timing, distribuição e o mecanismo por trás do anúncio.",
+  "slides": [
+    { "id": "cover", "eyebrow": "SINAL / 01", "title": "O sinal por trás do lançamento", "bodyMarkdown": "Uma mudança de produto pode ser uma mudança de tabuleiro.", "theme": "ink", "stat": { "value": "128%", "label": "atenção capturada" } },
+    { "id": "mechanism", "eyebrow": "MECANISMO / 02", "title": "O produto chega primeiro", "bodyMarkdown": "A distribuição começa antes da explicação, porque o formato já orienta o comportamento.", "theme": "paper" },
+    { "id": "timing", "eyebrow": "TIMING / 03", "title": "Agora é uma decisão", "bodyMarkdown": "O momento transforma uma funcionalidade numa posição competitiva.", "theme": "blue" },
+    { "id": "board", "eyebrow": "TABULEIRO / 04", "title": "A margem fica menor", "bodyMarkdown": "Cada rival passa a responder no mesmo espaço de atenção.", "theme": "sand" },
+    { "id": "money", "eyebrow": "DINHEIRO / 05", "title": "O custo muda de lugar", "bodyMarkdown": "O preço visível é só uma parte da conta: retenção, hábito e lock-in fazem o resto.", "theme": "red", "stat": { "value": "240", "label": "dias de vantagem" } },
+    { "id": "workflow", "eyebrow": "WORKFLOW / 06", "title": "O hábito é a interface", "bodyMarkdown": "Quando o caminho fica curto, a ferramenta entra no processo diário.", "theme": "paper" },
+    { "id": "contradiction", "eyebrow": "CONTRADIÇÃO / 07", "title": "A promessa pede contexto", "bodyMarkdown": "O anúncio parece simples até se observar quem controla a passagem seguinte.", "theme": "blue" },
+    { "id": "second-order", "eyebrow": "SEGUNDA ORDEM / 08", "title": "A resposta já começou", "bodyMarkdown": "Os concorrentes não copiam apenas a função; copiam a expectativa.", "theme": "sand" },
+    { "id": "angle", "eyebrow": "ÂNGULO / 09", "title": "Ler o movimento", "bodyMarkdown": "A pergunta útil é onde este produto quer que o mercado vá.", "theme": "red" },
+    { "id": "back-cover", "eyebrow": "FIM / 10", "title": "A notícia era o sintoma", "bodyMarkdown": "O diagnóstico está na distribuição.", "theme": "ink" }
+  ],
+  "formats": {
+    "blog": { "label": "Blog", "path": "formats/blog.md" },
+    "newsletter": { "label": "Newsletter", "path": "formats/newsletter.md" },
+    "linkedin": { "label": "LinkedIn", "path": "formats/linkedin.md" },
+    "xThread": { "label": "X/thread", "path": "formats/x-thread.md" },
+    "shortVideoIdeas": { "label": "Vídeos", "path": "formats/videos.md" },
+    "carousel": { "label": "Carrossel", "path": "formats/carousel.md" },
+    "titlesHooks": { "label": "Títulos & hooks", "path": "formats/titles-hooks.md" }
+  }
+}

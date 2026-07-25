@@ -14,6 +14,7 @@ import { validateSourceGateFile } from "./schemas/source-gate.js";
 import { makeId, nowIso } from "./util.js";
 import { getHnAiContext, getHnTopStories } from "./hn.js";
 import { buildRadarReportFromHn } from "./radar.js";
+import { exportEditorialHtml } from "./export-html.js";
 
 /**
  * Upper bounds for CLI integer options. Excessive values are rejected at
@@ -234,24 +235,30 @@ program
   .option("--url <urls...>", "optional URLs to focus the agent")
   .option("--schema <name>", "built-in schema: article | web-research", "web-research")
   .option("--model <name>", "Firecrawl Spark model: spark-1-mini | spark-1-pro", "spark-1-mini")
-  .option("--max-age <ms>", "Firecrawl maxAge in ms (default 0 = force fresh, research/fact-check)", parseMaxAgeMs)
-  .action(async (prompt: string, options: { url?: string[]; schema: string; model: string; maxAge?: number }) => {
+  .action(async (prompt: string, options: { url?: string[]; schema: string; model: string }) => {
     if (!isBuiltInExtractionSchemaName(options.schema)) throw new Error(`Unknown schema: ${options.schema}`);
     if (options.model !== "spark-1-mini" && options.model !== "spark-1-pro") throw new Error(`Unknown model: ${options.model}`);
 
-    const maxAgeMs = resolveResearchMaxAge(options.maxAge);
     const result = await runFirecrawlAgent({
       prompt,
       ...(options.url ? { urls: options.url } : {}),
       schema: getBuiltInExtractionJsonSchema(options.schema),
       model: options.model,
-      maxAgeMs,
     });
     const parsed = parseBuiltInExtraction(options.schema, result.data);
     const store = createFileStore();
     await store.saveExtraction(`agent-${options.schema}-${makeId("result")}`, parsed);
-    await saveRun("agent", { prompt, urls: options.url ?? [], schema: options.schema, model: options.model, maxAgeMs }, { result: parsed });
+    await saveRun("agent", { prompt, urls: options.url ?? [], schema: options.schema, model: options.model }, { result: parsed });
     print(parsed);
+  });
+
+program
+  .command("export-html")
+  .description("Export an editorial package as a self-contained HTML presentation")
+  .argument("<packageDir>", "package directory containing publication.json")
+  .action(async (packageDir: string) => {
+    const result = await exportEditorialHtml(packageDir);
+    print(result);
   });
 
 program
@@ -314,7 +321,7 @@ function resolveContentMaxAge(explicit: number | undefined): number | undefined 
 }
 
 /**
- * Resolve maxAge for research/fact-check style commands (extract-ai, agent).
+ * Resolve maxAge for structured research/fact-check scraping.
  * Defaults to `0` (force fresh, never serve cache) unless overridden.
  */
 function resolveResearchMaxAge(explicit: number | undefined): number {
