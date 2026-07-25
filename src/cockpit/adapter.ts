@@ -20,9 +20,19 @@ import type {
 const DEFAULT_MAX_FILE_BYTES = 400_000;
 const DEFAULT_MAX_RUN_BYTES = 20_000_000;
 const DEFAULT_MAX_RUN_LINE_BYTES = 600_000;
+const DEFAULT_MAX_RADAR_ITEMS = 500;
+const DEFAULT_MAX_PATH_DEPTH = 8;
 const DEFAULT_MAX_PACKAGES = 100;
 const DEFAULT_MAX_FILES_PER_PACKAGE = 32;
 const DEFAULT_MAX_AGGREGATE_BYTES = 8_000_000;
+const HARD_MAX_FILE_BYTES = 8_000_000;
+const HARD_MAX_RUN_BYTES = 32_000_000;
+const HARD_MAX_RUN_LINE_BYTES = 4_000_000;
+const HARD_MAX_RADAR_ITEMS = 5_000;
+const HARD_MAX_PATH_DEPTH = 32;
+const HARD_MAX_PACKAGES = 1_000;
+const HARD_MAX_FILES_PER_PACKAGE = 1_000;
+const HARD_MAX_AGGREGATE_BYTES = 64_000_000;
 const READ_CHUNK_BYTES = 64 * 1024;
 const SAFE_PACKAGE_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
@@ -53,6 +63,8 @@ export class CockpitArtifactAdapter {
   private readonly maxFileBytes: number;
   private readonly maxRunBytes: number;
   private readonly maxRunLineBytes: number;
+  private readonly maxRadarItems: number;
+  private readonly maxPathDepth: number;
   private readonly maxPackages: number;
   private readonly maxFilesPerPackage: number;
   private readonly maxAggregateBytes: number;
@@ -61,12 +73,14 @@ export class CockpitArtifactAdapter {
     const configured = options.dataDir ?? process.env.SCRAPE_AGENT_DATA_DIR;
     this.dataRootKind = configured ? "configured" : "default";
     this.configuredDataDir = resolve(configured ?? resolve(process.cwd(), "data"));
-    this.maxFileBytes = limit(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES);
-    this.maxRunBytes = limit(options.maxRunBytes, DEFAULT_MAX_RUN_BYTES);
-    this.maxRunLineBytes = limit(options.maxRunLineBytes, DEFAULT_MAX_RUN_LINE_BYTES);
-    this.maxPackages = limit(options.maxPackages ?? options.maxPackageCount, DEFAULT_MAX_PACKAGES);
-    this.maxFilesPerPackage = limit(options.maxFilesPerPackage ?? options.maxPackageFiles, DEFAULT_MAX_FILES_PER_PACKAGE);
-    this.maxAggregateBytes = limit(options.maxAggregateBytes ?? options.maxTotalBytes, DEFAULT_MAX_AGGREGATE_BYTES);
+    this.maxFileBytes = limit(options.maxFileBytes, DEFAULT_MAX_FILE_BYTES, HARD_MAX_FILE_BYTES);
+    this.maxRunBytes = limit(options.maxRunBytes, DEFAULT_MAX_RUN_BYTES, HARD_MAX_RUN_BYTES);
+    this.maxRunLineBytes = limit(options.maxRunLineBytes, DEFAULT_MAX_RUN_LINE_BYTES, HARD_MAX_RUN_LINE_BYTES);
+    this.maxRadarItems = limit(options.maxRadarItems, DEFAULT_MAX_RADAR_ITEMS, HARD_MAX_RADAR_ITEMS);
+    this.maxPathDepth = limit(options.maxDepth ?? options.maxPathDepth, DEFAULT_MAX_PATH_DEPTH, HARD_MAX_PATH_DEPTH);
+    this.maxPackages = limit(options.maxPackages ?? options.maxPackageCount, DEFAULT_MAX_PACKAGES, HARD_MAX_PACKAGES);
+    this.maxFilesPerPackage = limit(options.maxFilesPerPackage ?? options.maxPackageFiles, DEFAULT_MAX_FILES_PER_PACKAGE, HARD_MAX_FILES_PER_PACKAGE);
+    this.maxAggregateBytes = limit(options.maxAggregateBytes ?? options.maxTotalBytes, DEFAULT_MAX_AGGREGATE_BYTES, HARD_MAX_AGGREGATE_BYTES);
   }
 
   public async load(selectedSlug?: string): Promise<CockpitModel> {
@@ -90,7 +104,7 @@ export class CockpitArtifactAdapter {
       ? selectedSlug
       : packages[0]?.slug;
     const selectedPackage = selected ? packages.find((item) => item.slug === selected) : undefined;
-    const radar = await this.loadLatestRadar(root, warnings);
+    const radar = await this.loadLatestRadar(root, warnings, budget);
     const freshness = getFreshness(radar, selectedPackage);
 
     return {
@@ -133,7 +147,11 @@ export class CockpitArtifactAdapter {
         continue;
       }
       budget.packageFiles = 0;
-      packages.push(await this.loadPackage(root, slug, warnings, budget));
+      try {
+        packages.push(await this.loadPackage(root, slug, warnings, budget));
+      } catch {
+        warnings.push(`${slug}: o pacote mudou ou não pôde ser lido e foi ignorado.`);
+      }
     }
     return packages.sort((a, b) => (b.publishedOn ?? "").localeCompare(a.publishedOn ?? "") || b.slug.localeCompare(a.slug));
   }
@@ -220,25 +238,32 @@ export class CockpitArtifactAdapter {
     };
   }
 
-  private async loadLatestRadar(root: string, warnings: string[]): Promise<RadarState> {
+  private async loadLatestRadar(root: string, warnings: string[], budget: ReadBudget): Promise<RadarState> {
     const runsPath = await this.safeFile(root, "runs/runs.jsonl");
     if (!runsPath) return this.missingRadar("O registo de corridas não está disponível.");
 
     let handle;
     try {
       handle = await open(runsPath, constants.O_RDONLY | NO_FOLLOW);
+      if (!(await openedPathIsContained(root, runsPath, handle))) {
+        return this.missingRadar("O registo de corridas não está disponível.");
+      }
       const file = await handle.stat();
       if (!file.isFile()) return this.missingRadar("O registo de corridas não está disponível.");
 
-      const scanBytes = Math.min(file.size, this.maxRunBytes);
-      const start = file.size - scanBytes;
-      const truncated = start > 0;
-      const startsMidLine = await startsInMiddleOfLine(handle, start);
+      const availableBytes = Math.max(0, this.maxAggregateBytes - budget.aggregateBytes);
+      const scanLimit = Math.min(file.size, this.maxRunBytes, availableBytes);
+      const truncatedByFile = file.size > this.maxRunBytes;
+      const truncatedByBudget = file.size > availableBytes;
+      const truncated = truncatedByFile || truncatedByBudget;
+      const { data, startsMidLine, bytesRead } = await readRadarTail(handle, file.size, scanLimit);
+      budget.aggregateBytes += bytesRead;
       if (truncated) {
-        warnings.push(`O registo de corridas excede o orçamento de ${this.maxRunBytes} bytes; foi analisado apenas o trecho final${startsMidLine ? " e a primeira linha parcial foi ignorada" : ""}.`);
+        const reason = truncatedByBudget
+          ? `o orçamento agregado de ${this.maxAggregateBytes} bytes foi atingido`
+          : `o orçamento de ${this.maxRunBytes} bytes foi atingido`;
+        warnings.push(`O registo de corridas excede ${reason}; foi analisado apenas o trecho final${startsMidLine ? " e a primeira linha parcial foi ignorada" : ""}.`);
       }
-
-      const data = await readRange(handle, scanBytes, start);
       const latest = this.parseRadarTail(data, startsMidLine, warnings);
       if (!latest) return { ...this.missingRadar("Ainda não existe uma corrida radar-hn válida."), ...(truncated ? { truncated: true } : {}) };
       return {
@@ -271,6 +296,7 @@ export class CockpitArtifactAdapter {
     let oversizedLines = 0;
     let malformedLines = 0;
     let invalidRadarRuns = 0;
+    let oversizedRadarRuns = 0;
     let latest: RadarRun | undefined;
     let latestTimestamp = Number.NEGATIVE_INFINITY;
     while (lineStart < data.length) {
@@ -290,6 +316,8 @@ export class CockpitArtifactAdapter {
             const output = RadarOutputSchema.safeParse(parsed.data.output);
             if (!output.success) {
               invalidRadarRuns += 1;
+            } else if (output.data.items.length > this.maxRadarItems) {
+              oversizedRadarRuns += 1;
             } else {
               const timestamp = Date.parse(parsed.data.createdAt);
               if (timestamp >= latestTimestamp) {
@@ -308,6 +336,7 @@ export class CockpitArtifactAdapter {
     if (oversizedLines > 0) warnings.push(`${oversizedLines} linha(s) do registo de corridas excederam o limite e foram ignoradas.`);
     if (malformedLines > 0) warnings.push(`${malformedLines} linha(s) inválida(s) do registo de corridas foram ignoradas.`);
     if (invalidRadarRuns > 0) warnings.push(`Uma corrida radar-hn inválida: ${invalidRadarRuns} ocorrência(s) ignorada(s).`);
+    if (oversizedRadarRuns > 0) warnings.push(`${oversizedRadarRuns} corrida(s) radar-hn excederam o limite de ${this.maxRadarItems} itens e foram ignoradas.`);
     return latest;
   }
 
@@ -368,6 +397,9 @@ export class CockpitArtifactAdapter {
     let handle;
     try {
       handle = await open(file, constants.O_RDONLY | NO_FOLLOW);
+      if (!(await openedPathIsContained(root, file, handle))) {
+        return { status: "unreadable", detail: "Ficheiro fora da pasta de dados." };
+      }
       const fileStat = await handle.stat();
       if (!fileStat.isFile()) return { status: "unreadable", detail: "Ficheiro inacessível." };
       if (fileStat.size > this.maxFileBytes) return { status: "too-large", detail: "Ficheiro acima do limite de leitura." };
@@ -385,9 +417,10 @@ export class CockpitArtifactAdapter {
   }
 
   private async safeDirectory(root: string, relativePath: string): Promise<string | undefined> {
-    const candidate = safeJoin(root, relativePath);
+    const candidate = safeJoin(root, relativePath, this.maxPathDepth);
     if (!candidate) return undefined;
     try {
+      if (!(await pathComponentsAreSafe(root, candidate))) return undefined;
       const entry = await lstat(candidate);
       if (!entry.isDirectory() || entry.isSymbolicLink()) return undefined;
       const resolved = await realpath(candidate);
@@ -398,9 +431,10 @@ export class CockpitArtifactAdapter {
   }
 
   private async safeFile(root: string, relativePath: string): Promise<string | undefined> {
-    const candidate = safeJoin(root, relativePath);
+    const candidate = safeJoin(root, relativePath, this.maxPathDepth);
     if (!candidate) return undefined;
     try {
+      if (!(await pathComponentsAreSafe(root, candidate))) return undefined;
       const entry = await lstat(candidate);
       if (!entry.isFile()) return undefined;
       const resolved = await realpath(candidate);
@@ -420,10 +454,11 @@ export class CockpitArtifactAdapter {
 }
 
 /**
- * O_NOFOLLOW protects the final path component, and fstat/read operate on the
- * opened descriptor. Node has no portable openat-style API, so a concurrent
- * replacement of an intermediate directory remains a residual TOCTOU limit;
- * realpath containment is still checked before opening every artifact.
+ * O_NOFOLLOW protects the final path component, pathComponentsAreSafe rejects
+ * symlinked components before opening, and the descriptor target is checked
+ * again after open. The read still uses the opened descriptor and a bounded
+ * byte count, so replacement or truncation during a read degrades to a partial
+ * artifact instead of following a new path or allocating without a limit.
  */
 async function boundedDirectoryEntries(directoryPath: string, limit: number): Promise<{ entries: Dirent[]; truncated: boolean }> {
   const directory = await opendir(directoryPath);
@@ -441,6 +476,22 @@ async function boundedDirectoryEntries(directoryPath: string, limit: number): Pr
     await directory.close().catch(() => undefined);
   }
   return { entries, truncated };
+}
+
+async function readRadarTail(
+  handle: Awaited<ReturnType<typeof open>>,
+  fileSize: number,
+  scanLimit: number,
+): Promise<{ data: Buffer; startsMidLine: boolean; bytesRead: number }> {
+  if (scanLimit <= 0 || fileSize <= 0) return { data: Buffer.alloc(0), startsMidLine: false, bytesRead: 0 };
+  const start = fileSize - scanLimit;
+  const startsMidLine = start > 0 && await startsInMiddleOfLine(handle, start);
+  const raw = await readRange(handle, scanLimit, start);
+  return {
+    data: raw,
+    startsMidLine,
+    bytesRead: raw.byteLength,
+  };
 }
 
 async function startsInMiddleOfLine(handle: Awaited<ReturnType<typeof open>>, start: number): Promise<boolean> {
@@ -465,12 +516,47 @@ async function readRange(handle: Awaited<ReturnType<typeof open>>, length: numbe
   return Buffer.concat(chunks);
 }
 
+async function pathComponentsAreSafe(root: string, candidate: string): Promise<boolean> {
+  const relation = relative(root, candidate);
+  if (!isContained(root, candidate)) return false;
+  if (relation === "") return true;
+
+  let current = root;
+  for (const segment of relation.split(sep)) {
+    current = resolve(current, segment);
+    try {
+      const entry = await lstat(current);
+      if (entry.isSymbolicLink()) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+async function openedPathIsContained(
+  root: string,
+  expectedPath: string,
+  handle: Awaited<ReturnType<typeof open>>,
+): Promise<boolean> {
+  const descriptorPath = `/proc/self/fd/${handle.fd}`;
+  const openedPath = await realpath(descriptorPath).catch(async () => {
+    try {
+      return await realpath(expectedPath);
+    } catch {
+      return undefined;
+    }
+  });
+  return openedPath !== undefined && isContained(root, openedPath);
+}
+
 export async function loadCockpitModel(options: AdapterOptions = {}, selectedSlug?: string): Promise<CockpitModel> {
   return new CockpitArtifactAdapter(options).load(selectedSlug);
 }
 
-function safeJoin(root: string, relativePath: string): string | undefined {
+function safeJoin(root: string, relativePath: string, maxDepth?: number): string | undefined {
   if (!relativePath || relativePath.includes("\0") || isAbsolute(relativePath) || relativePath.split(/[\\/]/u).some((segment) => segment === "..")) return undefined;
+  if (maxDepth !== undefined && pathDepth(relativePath) > maxDepth) return undefined;
   const candidate = resolve(root, relativePath);
   return isContained(root, candidate) ? candidate : undefined;
 }
@@ -478,6 +564,10 @@ function safeJoin(root: string, relativePath: string): string | undefined {
 function isContained(root: string, candidate: string): boolean {
   const relation = relative(root, candidate);
   return relation === "" || (relation !== ".." && !relation.startsWith(`..${sep}`) && !isAbsolute(relation));
+}
+
+function pathDepth(value: string): number {
+  return value.split(/[\\/]/u).filter((segment) => segment !== "").length;
 }
 
 function parseJsonPayload(text: string): { ok: true; value: unknown } | { ok: false } {
@@ -528,8 +618,10 @@ function getFreshness(radar: RadarState, item: CockpitPackage | undefined): stri
   return new Intl.DateTimeFormat("pt-PT", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(new Date(latest));
 }
 
-function limit(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
+function limit(value: number | undefined, fallback: number, maximum: number): number {
+  return value !== undefined && Number.isFinite(value) && value >= 0
+    ? Math.min(Math.floor(value), maximum)
+    : fallback;
 }
 
 export { parseJsonPayload, safeJoin };

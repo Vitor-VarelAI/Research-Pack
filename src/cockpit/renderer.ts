@@ -32,6 +32,8 @@ const SCORE_LABELS: Record<string, string> = {
   distributionLeverage: "Alavanca de distribuição",
   moneyIncentive: "Incentivo financeiro",
 };
+type QaVerdict = "PASS" | "HOLD" | "REVIEW";
+type QaSignal = QaVerdict | "CONTRADITÓRIO" | "sem decisão" | "sem erros" | "indisponível";
 
 export function renderMarkdownSafe(markdown: string): string {
   const prepared = prepareMarkdown(markdown);
@@ -40,8 +42,8 @@ export function renderMarkdownSafe(markdown: string): string {
     return sanitizeHtml(raw, {
       allowedTags: MARKDOWN_TAGS,
       allowedAttributes: { a: ["href", "title", "target", "rel"] },
-      allowedSchemes: ["http", "https", "mailto"],
-      allowedSchemesByTag: { a: ["http", "https", "mailto"] },
+      allowedSchemes: ["http", "https"],
+      allowedSchemesByTag: { a: ["http", "https"] },
       allowProtocolRelative: false,
       disallowedTagsMode: "discard",
       transformTags: {
@@ -65,10 +67,10 @@ export function renderMarkdownSafe(markdown: string): string {
 }
 
 export function safeExternalUrl(value: string | undefined): string | undefined {
-  if (!value) return undefined;
+  if (!value || /[\u0000-\u001f\u007f]/u.test(value)) return undefined;
   try {
-    const parsed = new URL(value);
-    if (parsed.protocol !== "http:" && parsed.protocol !== "https:" && parsed.protocol !== "mailto:") return undefined;
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
     parsed.username = "";
     parsed.password = "";
     for (const key of [...parsed.searchParams.keys()]) {
@@ -176,24 +178,27 @@ function renderSummary(model: CockpitModel, selected: CockpitPackage | undefined
   const qaCount = selected ? selected.qa.html.length + selected.qa.factCheck.length + selected.qa.lint.length : 0;
   return `<section class="summary" aria-label="Resumo operacional">
     <article class="summary-card summary-card--accent"><span class="summary-label">Pacote activo</span><strong>${escapeHtml(selected?.slug ?? "Sem seleção")}</strong><span>${selected?.manifest.status === "ok" ? "manifesto válido" : "manifesto com problemas"}</span></article>
-    <article class="summary-card"><span class="summary-label">Radar global</span><strong>${radarCount}</strong><span>${model.radar.status === "ok" ? "histórias com sinal" : "sem corrida válida"}</span></article>
-    <article class="summary-card"><span class="summary-label">Âncoras</span><strong>${sourceCount}</strong><span>fontes no source gate</span></article>
-    <article class="summary-card"><span class="summary-label">Saídas</span><strong>${formatCount}/7</strong><span>${qaCount} evidências QA carregadas</span></article>
+    <article class="summary-card"><span class="summary-label">Radar global</span><strong>${escapeHtml(String(radarCount))}</strong><span>${model.radar.status === "ok" ? "histórias com sinal" : "sem corrida válida"}</span></article>
+    <article class="summary-card"><span class="summary-label">Âncoras</span><strong>${escapeHtml(String(sourceCount))}</strong><span>fontes no source gate</span></article>
+    <article class="summary-card"><span class="summary-label">Saídas</span><strong>${escapeHtml(`${formatCount}/7`)}</strong><span>${escapeHtml(String(qaCount))} evidências QA carregadas</span></article>
   </section>`;
 }
 
 function renderWarnings(warnings: string[]): string {
-  return `<aside class="warnings" aria-label="Avisos de integridade"><div class="warning-icon" aria-hidden="true">!</div><div><strong>Há artefactos a confirmar</strong><ul>${warnings.slice(0, 12).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>${warnings.length > 12 ? `<p>+ ${warnings.length - 12} avisos adicionais.</p>` : ""}</div></aside>`;
+  return `<aside class="warnings" aria-label="Avisos de integridade"><div class="warning-icon" aria-hidden="true">!</div><div><strong>Há artefactos a confirmar</strong><ul>${warnings.slice(0, 12).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>${warnings.length > 12 ? `<p>+ ${escapeHtml(String(warnings.length - 12))} avisos adicionais.</p>` : ""}</div></aside>`;
 }
 
 function renderRadar(model: CockpitModel): string {
   const limitedNotice = model.radar.truncated ? `<span class="radar-limited">Leitura limitada à cauda do ficheiro</span>` : "";
   if (model.radar.status !== "ok" || !model.radar.value) return `${renderEmpty(model.radar.detail ?? "O radar não está disponível.")}${limitedNotice ? `<p class="radar-limited-note">${limitedNotice}</p>` : ""}`;
   const items = model.radar.value.items.map((item, index) => {
-    const scoreEntries = Object.entries(item.scores).map(([key, value]) => `<span class="score-line"><span>${escapeHtml(SCORE_LABELS[key] ?? key)}</span><b>${value}/5</b><i><em style="width:${value * 20}%"></em></i></span>`).join("");
-    return `<article class="radar-item"><div class="rank">${String(item.rank ?? index + 1).padStart(2, "0")}</div><div class="radar-main"><div class="item-meta"><span>${escapeHtml(item.source.toUpperCase())}</span><span>${item.commentsCount ?? 0} comentários</span><span>total ${item.totalScore}</span></div><h3>${escapeHtml(item.title)}</h3><a class="safe-url" href="${escapeHtml(safeExternalUrl(item.url) ?? "#")}" target="_blank" rel="noreferrer noopener">${escapeHtml(displayUrl(item.url))}</a><p>${escapeHtml(item.whyCollect)}</p><div class="chips">${item.signals.map((signal) => `<span class="chip">${escapeHtml(signal)}</span>`).join("")}</div><details><summary>Dimensões e ângulos</summary><div class="score-grid">${scoreEntries}</div><div class="detail-columns"><div><h4>Ângulos possíveis</h4><ul>${item.possibleAngles.map((angle) => `<li>${escapeHtml(angle)}</li>`).join("")}</ul></div><div><h4>Perguntas estratégicas</h4><ul>${item.strategicQuestions.slice(0, 3).map((question) => `<li>${escapeHtml(question)}</li>`).join("")}</ul></div></div></details></div><div class="radar-score"><span>score</span><strong>${item.totalScore}</strong></div></article>`;
+    const scoreEntries = Object.entries(item.scores).map(([key, value]) => {
+      const score = Number.isFinite(value) ? Math.max(0, Math.min(5, value)) : 0;
+      return `<span class="score-line"><span>${escapeHtml(SCORE_LABELS[key] ?? key)}</span><b>${escapeHtml(`${score}/5`)}</b><i><em style="width:${escapeHtml(`${score * 20}%`)}"></em></i></span>`;
+    }).join("");
+    return `<article class="radar-item"><div class="rank">${escapeHtml(String(item.rank ?? index + 1).padStart(2, "0"))}</div><div class="radar-main"><div class="item-meta"><span>${escapeHtml(item.source.toUpperCase())}</span><span>${escapeHtml(String(item.commentsCount ?? 0))} comentários</span><span>total ${escapeHtml(String(item.totalScore))}</span></div><h3>${escapeHtml(item.title)}</h3>${renderExternalLink(item.url)}<p>${escapeHtml(item.whyCollect)}</p><div class="chips">${item.signals.map((signal) => `<span class="chip">${escapeHtml(signal)}</span>`).join("")}</div><details><summary>Dimensões e ângulos</summary><div class="score-grid">${scoreEntries}</div><div class="detail-columns"><div><h4>Ângulos possíveis</h4><ul>${item.possibleAngles.map((angle) => `<li>${escapeHtml(angle)}</li>`).join("")}</ul></div><div><h4>Perguntas estratégicas</h4><ul>${item.strategicQuestions.slice(0, 3).map((question) => `<li>${escapeHtml(question)}</li>`).join("")}</ul></div></div></details></div><div class="radar-score"><span>score</span><strong>${escapeHtml(String(item.totalScore))}</strong></div></article>`;
   }).join("");
-  return `<div class="radar-context"><span class="live-marker"></span><strong>Global</strong><span>radar-hn · ${escapeHtml(formatDate(model.radar.runAt ?? model.radar.value.generatedAt))}</span><span class="muted">${model.radar.value.itemCount} itens</span>${limitedNotice}</div><div class="radar-list">${items}</div>`;
+  return `<div class="radar-context"><span class="live-marker"></span><strong>Global</strong><span>radar-hn · ${escapeHtml(formatDate(model.radar.runAt ?? model.radar.value.generatedAt))}</span><span class="muted">${escapeHtml(String(model.radar.value.itemCount))} itens</span>${limitedNotice}</div><div class="radar-list">${items}</div>`;
 }
 
 function renderSources(selected: CockpitPackage | undefined): string {
@@ -201,12 +206,13 @@ function renderSources(selected: CockpitPackage | undefined): string {
   if (!gate) return renderArtifactNotice(selected?.sourceGate, "O source-gate.json não está disponível ou é inválido.");
   const confirmed = gate.anchors.reduce((count, anchor) => count + anchor.confirmedClaims.length, 0);
   const unconfirmed = gate.anchors.reduce((count, anchor) => count + anchor.unconfirmedClaims.length, 0);
-  return `<div class="source-overview"><div class="source-status ${gate.pass ? "is-good" : "is-warning"}"><span class="eyebrow">Decisão canónica</span><strong>${gate.pass ? "PASS" : "HOLD"}</strong><p>${gate.diagnosisAllowed ? "Diagnóstico autorizado pelo source gate." : "Diagnóstico não autorizado pelo source gate."}</p></div><div class="metric-card"><span>Âncoras</span><strong>${gate.anchors.length}</strong><small>mínimo ${gate.needsExtraAnchor ? "4" : "3"}</small></div><div class="metric-card"><span>Claims confirmados</span><strong>${confirmed}</strong><small>por todas as âncoras</small></div><div class="metric-card"><span>Claims por confirmar</span><strong>${unconfirmed}</strong><small>mantidos visíveis</small></div></div><div class="source-layout"><div class="source-anchors"><h3>Âncoras canónicas</h3>${gate.anchors.map((anchor, index) => `<article class="source-card"><div class="source-number">${String(index + 1).padStart(2, "0")}</div><div><div class="item-meta"><span>${escapeHtml(anchor.sourceType)}</span><span>${anchor.confirmedClaims.length} confirmados</span><span>${anchor.unconfirmedClaims.length} por confirmar</span></div><h3>${escapeHtml(anchor.sourceName)}</h3><a class="safe-url" href="${escapeHtml(safeExternalUrl(anchor.sourceUrl) ?? "#")}" target="_blank" rel="noreferrer noopener">${escapeHtml(displayUrl(anchor.sourceUrl))}</a><p class="risk"><strong>Risco de interpretação:</strong> ${escapeHtml(anchor.interpretationRisk)}</p><details><summary>Claims</summary><div class="claim-columns"><div><h4>Confirmados</h4><ul>${anchor.confirmedClaims.map((claim) => `<li>${escapeHtml(claim)}</li>`).join("") || "<li>Nenhum registado.</li>"}</ul></div><div><h4>Não confirmados</h4><ul>${anchor.unconfirmedClaims.map((claim) => `<li>${escapeHtml(claim)}</li>`).join("") || "<li>Nenhum registado.</li>"}</ul></div></div></details></div></article>`).join("")}</div><aside class="source-side"><div class="side-card"><h3>Categorias sensíveis</h3><div class="chips">${gate.sensitiveCategories.map((category) => `<span class="chip chip--warm">${escapeHtml(category)}</span>`).join("") || "<span class=\"muted\">Nenhuma registada.</span>"}</div><p>${escapeHtml(gate.notes || "Sem notas adicionais.")}</p></div><div class="side-card"><h3>Claims não suportados</h3>${gate.unsupportedClaims.map((claim) => `<div class="unsupported"><strong>${escapeHtml(claim.claim)}</strong><p>${escapeHtml(claim.whyUnsupported)}</p><span>${escapeHtml(claim.suggestedSourceType)}</span></div>`).join("") || "<p class=\"muted\">Nenhum claim não suportado registado.</p>"}</div></aside></div>`;
+  const gateVerdict = sourceGateDecision(gate);
+  return `<div class="source-overview"><div class="source-status ${gateVerdict === "PASS" ? "is-good" : "is-warning"}"><span class="eyebrow">Decisão canónica</span><strong>${escapeHtml(gateVerdict)}</strong><p>${gateVerdict === "PASS" ? "Diagnóstico autorizado pelo source gate." : gateVerdict === "HOLD" ? "Diagnóstico não autorizado pelo source gate." : "O source gate contém sinais contraditórios."}</p></div><div class="metric-card"><span>Âncoras</span><strong>${escapeHtml(String(gate.anchors.length))}</strong><small>mínimo ${escapeHtml(gate.needsExtraAnchor ? "4" : "3")}</small></div><div class="metric-card"><span>Claims confirmados</span><strong>${escapeHtml(String(confirmed))}</strong><small>por todas as âncoras</small></div><div class="metric-card"><span>Claims por confirmar</span><strong>${escapeHtml(String(unconfirmed))}</strong><small>mantidos visíveis</small></div></div><div class="source-layout"><div class="source-anchors"><h3>Âncoras canónicas</h3>${gate.anchors.map((anchor, index) => `<article class="source-card"><div class="source-number">${escapeHtml(String(index + 1).padStart(2, "0"))}</div><div><div class="item-meta"><span>${escapeHtml(anchor.sourceType)}</span><span>${escapeHtml(String(anchor.confirmedClaims.length))} confirmados</span><span>${escapeHtml(String(anchor.unconfirmedClaims.length))} por confirmar</span></div><h3>${escapeHtml(anchor.sourceName)}</h3>${renderExternalLink(anchor.sourceUrl)}<p class="risk"><strong>Risco de interpretação:</strong> ${escapeHtml(anchor.interpretationRisk)}</p><details><summary>Claims</summary><div class="claim-columns"><div><h4>Confirmados</h4><ul>${anchor.confirmedClaims.map((claim) => `<li>${escapeHtml(claim)}</li>`).join("") || "<li>Nenhum registado.</li>"}</ul></div><div><h4>Não confirmados</h4><ul>${anchor.unconfirmedClaims.map((claim) => `<li>${escapeHtml(claim)}</li>`).join("") || "<li>Nenhum registado.</li>"}</ul></div></div></details></div></article>`).join("")}</div><aside class="source-side"><div class="side-card"><h3>Categorias sensíveis</h3><div class="chips">${gate.sensitiveCategories.map((category) => `<span class="chip chip--warm">${escapeHtml(category)}</span>`).join("") || "<span class=\"muted\">Nenhuma registada.</span>"}</div><p>${escapeHtml(gate.notes || "Sem notas adicionais.")}</p></div><div class="side-card"><h3>Claims não suportados</h3>${gate.unsupportedClaims.map((claim) => `<div class="unsupported"><strong>${escapeHtml(claim.claim)}</strong><p>${escapeHtml(claim.whyUnsupported)}</p><span>${escapeHtml(claim.suggestedSourceType)}</span></div>`).join("") || "<p class=\"muted\">Nenhum claim não suportado registado.</p>"}</div></aside></div>`;
 }
 
 function renderMarkdownArtifact(artifact: MarkdownArtifact | undefined, empty: string, className = "") {
   if (!artifact || artifact.status !== "ok" || artifact.value === undefined) return renderArtifactNotice(artifact, empty);
-  return `<article class="markdown-card ${className}"><div class="prose">${renderMarkdownSafe(artifact.value)}</div></article>`;
+  return `<article class="markdown-card ${escapeHtml(className)}"><div class="prose">${renderMarkdownSafe(artifact.value)}</div></article>`;
 }
 
 function renderFormats(selected: CockpitPackage | undefined): string {
@@ -214,64 +220,112 @@ function renderFormats(selected: CockpitPackage | undefined): string {
   const publication = selected.manifest.value;
   const tabs = selected.formats.map((format, index) => `<button class="format-tab" type="button" role="tab" tabindex="${index === 0 ? "0" : "-1"}" aria-selected="${index === 0 ? "true" : "false"}" aria-controls="format-panel-${escapeHtml(format.id)}" id="format-tab-${escapeHtml(format.id)}" data-format-id="${escapeHtml(format.id)}">${escapeHtml(format.label)}</button>`).join("");
   const panels = selected.formats.map((format, index) => `<article class="format-panel ${index === 0 ? "is-active" : ""}" role="tabpanel" aria-hidden="${index === 0 ? "false" : "true"}" id="format-panel-${escapeHtml(format.id)}" aria-labelledby="format-tab-${escapeHtml(format.id)}" data-format-panel="${escapeHtml(format.id)}">${format.markdown.status === "ok" && format.markdown.value !== undefined ? `<div class="format-meta"><span>Manifesto · ${escapeHtml(format.label)}</span><span>disponível</span></div><div class="prose">${renderMarkdownSafe(format.markdown.value)}</div>` : renderArtifactNotice(format.markdown, `O formato ${format.label} não está disponível.`)}</article>`).join("");
-  const slides = publication ? publication.slides.map((slide, index) => `<li><span class="slide-index">${String(index + 1).padStart(2, "0")}</span><span><strong>${escapeHtml(slide.eyebrow)}</strong>${escapeHtml(slide.title)}</span>${slide.stat ? `<b>${escapeHtml(String(slide.stat.value))}</b>` : ""}</li>`).join("") : "";
+  const slides = publication ? publication.slides.map((slide, index) => `<li><span class="slide-index">${escapeHtml(String(index + 1).padStart(2, "0"))}</span><span><strong>${escapeHtml(slide.eyebrow)}</strong>${escapeHtml(slide.title)}</span>${slide.stat ? `<b>${escapeHtml(String(slide.stat.value))}</b>` : ""}</li>`).join("") : "";
   const previewNote = selected.indexHtml.status === "ok"
     ? "A apresentação index.html foi detetada, mas não é executada para manter a fronteira de leitura segura."
     : "O index.html não está disponível; a apresentação não é executada neste cockpit.";
-  return `<div class="formats-grid"><div><div class="tabs" role="tablist" aria-label="Sete formatos de publicação">${tabs}</div><div class="format-panels">${panels}</div></div><aside class="slides-card"><div class="item-meta"><span>Resumo da apresentação</span><span>${publication?.slides.length ?? 0} slides</span></div><h3>${escapeHtml(publication?.title ?? "Sem manifesto")}</h3><ol>${slides || "<li>Resumo indisponível.</li>"}</ol><p class="muted">${previewNote}</p></aside></div>`;
+  return `<div class="formats-grid"><div><div class="tabs" role="tablist" aria-label="Sete formatos de publicação">${tabs}</div><div class="format-panels">${panels}</div></div><aside class="slides-card"><div class="item-meta"><span>Resumo da apresentação</span><span>${escapeHtml(String(publication?.slides.length ?? 0))} slides</span></div><h3>${escapeHtml(publication?.title ?? "Sem manifesto")}</h3><ol>${slides || "<li>Resumo indisponível.</li>"}</ol><p class="muted">${previewNote}</p></aside></div>`;
 }
 
 function renderQa(selected: CockpitPackage | undefined): string {
   if (!selected) return renderEmpty("Selecione um pacote para ver QA.");
   const canonical = selected.qa.canonical.value;
-  const canonicalVerdict = canonical ? (canonical.pass ? "PASS" : "HOLD") : undefined;
+  const canonicalVerdict = canonical ? sourceGateDecision(canonical) : undefined;
   const humanVerdict = selected.qa.humanNotes.status === "ok" && selected.qa.humanNotes.value !== undefined
     ? humanDecision(selected.qa.humanNotes.value)
     : undefined;
   const workerEvidence = [...selected.qa.html, ...selected.qa.factCheck, ...selected.qa.lint];
-  const workerVerdicts = workerEvidence
-    .map((item) => item.artifact.status === "ok" ? evidenceDecision(item.artifact.value) : undefined)
-    .filter((value): value is string => value !== undefined && value !== "carregado" && value !== "sem erros");
-  const signals = [canonicalVerdict, humanVerdict, ...workerVerdicts].filter((value): value is string => value !== undefined);
-  const disagreement = new Set(signals).size > 1;
+  const workerStates = workerEvidence.map((item) => item.artifact.status === "ok" ? conservativeEvidenceDecision(item.artifact.value) : "indisponível");
+  const canonicalSignal = canonicalVerdict;
+  const humanSignal = humanVerdict && isQaVerdict(humanVerdict) ? humanVerdict : "sem decisão";
+  const workerSignals = workerStates.filter(isQaVerdict);
+  const explicitSignals = [canonicalSignal, humanSignal, ...workerSignals].filter(isQaVerdict);
+  const hasContradiction = canonicalSignal === "CONTRADITÓRIO" || workerStates.includes("CONTRADITÓRIO");
+  const disagreement = hasContradiction || new Set(explicitSignals).size > 1;
+  const allRequiredPass = canonicalSignal === "PASS"
+    && humanSignal === "PASS"
+    && workerEvidence.length > 0
+    && workerStates.every((state) => state === "PASS");
+  const combinedVerdict = allRequiredPass
+    ? "PASS"
+    : disagreement
+      ? "DESACORDO"
+      : explicitSignals.includes("HOLD")
+        ? "HOLD"
+        : explicitSignals.includes("REVIEW")
+          ? "REVIEW"
+          : "SEM DECISÃO";
   const signalSummary = [
     canonicalVerdict ? `canónico: ${canonicalVerdict}` : "canónico: indisponível",
     humanVerdict ? `humano: ${humanVerdict}` : "humano: sem decisão explícita",
-    workerVerdicts.length > 0 ? `workers: ${[...new Set(workerVerdicts)].join(", ")}` : "workers: sem veredicto explícito",
+    workerEvidence.length > 0
+      ? `workers: ${[...new Set(workerStates)].join(", ")}`
+      : "workers: sem evidência",
   ].join(" · ");
-  const canonicalBlock = canonical ? `<article class="qa-canonical"><div><span class="eyebrow">Source gate / decisão canónica</span><strong class="qa-decision ${canonical.pass ? "is-good" : "is-warning"}">${canonicalVerdict}</strong><p>${canonical.diagnosisAllowed ? "O diagnóstico está autorizado." : "O diagnóstico está bloqueado."}</p></div><dl><div><dt>Âncoras</dt><dd>${canonical.anchors.length}</dd></div><div><dt>Sensíveis</dt><dd>${canonical.sensitiveCategories.length}</dd></div><div><dt>Claims sem suporte</dt><dd>${canonical.unsupportedClaims.length}</dd></div></dl></article>` : renderArtifactNotice(selected.qa.canonical, "A decisão canónica não está disponível.");
-  const reconciliation = `<article class="qa-reconciliation ${disagreement ? "is-conflict" : ""}"><div><span class="eyebrow">Leitura combinada</span><strong>${disagreement ? "DESACORDO" : signals.length > 0 ? "EVIDÊNCIA ALINHADA" : "SEM DECISÃO"}</strong><p>${escapeHtml(signalSummary)}</p></div></article>`;
+  const canonicalBlock = canonical ? `<article class="qa-canonical"><div><span class="eyebrow">Source gate / decisão canónica</span><strong class="qa-decision ${canonicalVerdict === "PASS" ? "is-good" : "is-warning"}">${escapeHtml(canonicalVerdict ?? "indisponível")}</strong><p>${canonicalVerdict === "PASS" ? "O diagnóstico está autorizado." : canonicalVerdict === "HOLD" ? "O diagnóstico está bloqueado." : "Os sinais do source gate são contraditórios."}</p></div><dl><div><dt>Âncoras</dt><dd>${escapeHtml(String(canonical.anchors.length))}</dd></div><div><dt>Sensíveis</dt><dd>${escapeHtml(String(canonical.sensitiveCategories.length))}</dd></div><div><dt>Claims sem suporte</dt><dd>${escapeHtml(String(canonical.unsupportedClaims.length))}</dd></div></dl></article>` : renderArtifactNotice(selected.qa.canonical, "A decisão canónica não está disponível.");
+  const reconciliation = `<article class="qa-reconciliation ${combinedVerdict === "PASS" ? "" : "is-conflict"}"><div><span class="eyebrow">Leitura combinada</span><strong>${escapeHtml(combinedVerdict)}</strong><p>${escapeHtml(signalSummary)}</p></div></article>`;
   const humanLabel = humanVerdict ? `humano · ${humanVerdict}` : "qa-notes";
-  return `<div class="qa-stack">${canonicalBlock}${reconciliation}<div class="qa-grid"><article class="qa-card"><div class="card-heading"><h3>Notas humanas</h3><span>${escapeHtml(humanLabel)}</span></div>${selected.qa.humanNotes.status === "ok" && selected.qa.humanNotes.value !== undefined ? `<div class="prose prose--compact">${renderMarkdownSafe(selected.qa.humanNotes.value)}</div>` : `<p class="muted">${escapeHtml(selected.qa.humanNotes.detail ?? "Não disponível.")}</p>`}</article><article class="qa-card"><div class="card-heading"><h3>HTML QA</h3><span>${selected.qa.html.length} ficheiro(s)</span></div>${renderEvidenceList(selected.qa.html)}</article><article class="qa-card"><div class="card-heading"><h3>Fact-check</h3><span>${selected.qa.factCheck.length} ficheiro(s)</span></div>${renderEvidenceList(selected.qa.factCheck)}</article><article class="qa-card"><div class="card-heading"><h3>Lint editorial e formatos</h3><span>${selected.qa.lint.length} ficheiro(s)</span></div>${renderEvidenceList(selected.qa.lint)}</article></div></div>`;
+  return `<div class="qa-stack">${canonicalBlock}${reconciliation}<div class="qa-grid"><article class="qa-card"><div class="card-heading"><h3>Notas humanas</h3><span>${escapeHtml(humanLabel)}</span></div>${selected.qa.humanNotes.status === "ok" && selected.qa.humanNotes.value !== undefined ? `<div class="prose prose--compact">${renderMarkdownSafe(selected.qa.humanNotes.value)}</div>` : `<p class="muted">${escapeHtml(selected.qa.humanNotes.detail ?? "Não disponível.")}</p>`}</article><article class="qa-card"><div class="card-heading"><h3>HTML QA</h3><span>${escapeHtml(String(selected.qa.html.length))} ficheiro(s)</span></div>${renderEvidenceList(selected.qa.html)}</article><article class="qa-card"><div class="card-heading"><h3>Fact-check</h3><span>${escapeHtml(String(selected.qa.factCheck.length))} ficheiro(s)</span></div>${renderEvidenceList(selected.qa.factCheck)}</article><article class="qa-card"><div class="card-heading"><h3>Lint editorial e formatos</h3><span>${escapeHtml(String(selected.qa.lint.length))} ficheiro(s)</span></div>${renderEvidenceList(selected.qa.lint)}</article></div></div>`;
 }
 
 function renderEvidenceList(items: QaEvidence[]): string {
   if (items.length === 0) return `<p class="muted">Nenhuma evidência disponível.</p>`;
-  return `<div class="evidence-list">${items.map((item) => `<details class="evidence"><summary><span>${escapeHtml(item.provider)}</span><span class="evidence-kind">${escapeHtml(item.kind)}</span><span>${item.final ? "final" : "não final"}</span><b class="evidence-status ${item.artifact.status === "ok" ? "is-good" : "is-warning"}">${item.artifact.status === "ok" ? evidenceDecision(item.artifact.value) : "indisponível"}</b></summary>${item.artifact.status === "ok" ? `<pre>${escapeHtml(formatEvidence(item.artifact.value))}</pre>` : `<p class="muted">${escapeHtml(item.artifact.detail ?? "Artefacto inválido.")}</p>`}</details>`).join("")}</div>`;
+  return `<div class="evidence-list">${items.map((item) => {
+    const decision = item.artifact.status === "ok" ? conservativeEvidenceDecision(item.artifact.value) : "indisponível";
+    return `<details class="evidence"><summary><span>${escapeHtml(item.provider)}</span><span class="evidence-kind">${escapeHtml(item.kind)}</span><span>${item.final ? "final" : "não final"}</span><b class="evidence-status ${decision === "PASS" ? "is-good" : "is-warning"}">${escapeHtml(decision)}</b></summary>${item.artifact.status === "ok" ? `<pre>${escapeHtml(formatEvidence(item.artifact.value))}</pre>` : `<p class="muted">${escapeHtml(item.artifact.detail ?? "Artefacto inválido.")}</p>`}</details>`;
+  }).join("")}</div>`;
 }
 
 export function evidenceDecision(value: unknown): string {
-  if (isRecord(value)) {
-    if (typeof value.model_verdict === "string") return normaliseVerdict(value.model_verdict);
-    if (typeof value.pass === "boolean") return value.pass ? "PASS" : "HOLD";
-    if (isRecord(value.presentation) && Array.isArray(value.presentation.consoleErrors) && value.presentation.consoleErrors.length === 0) return "sem erros";
+  return conservativeEvidenceDecision(value);
+}
+
+function sourceGateDecision(value: SourceGateResult): QaSignal {
+  const requiredAnchors = value.sensitiveCategories.length > 0 ? 4 : 3;
+  const expectedPass = value.anchors.length >= requiredAnchors;
+  const consistent = value.minimumAnchorsFound === value.anchors.length
+    && value.needsExtraAnchor === (value.sensitiveCategories.length > 0)
+    && value.pass === expectedPass
+    && value.diagnosisAllowed === expectedPass;
+  if (!consistent) return "CONTRADITÓRIO";
+  return expectedPass ? "PASS" : "HOLD";
+}
+
+function conservativeEvidenceDecision(value: unknown): QaSignal {
+  if (!isRecord(value)) return "sem decisão";
+  const hasModelVerdict = Object.prototype.hasOwnProperty.call(value, "model_verdict");
+  const hasPass = Object.prototype.hasOwnProperty.call(value, "pass");
+  const modelVerdict = typeof value.model_verdict === "string" ? parseExplicitVerdict(value.model_verdict) : undefined;
+  const passVerdict = typeof value.pass === "boolean" ? (value.pass ? "PASS" : "HOLD") : undefined;
+  if ((hasModelVerdict && typeof value.model_verdict !== "string") || (hasPass && !passVerdict)) return "CONTRADITÓRIO";
+  if (isRecord(value.presentation) && Array.isArray(value.presentation.consoleErrors) && value.presentation.consoleErrors.length > 0) {
+    return modelVerdict === "PASS" || passVerdict === "PASS" ? "CONTRADITÓRIO" : "HOLD";
   }
-  return "carregado";
+  if (modelVerdict === "PASS" && passVerdict === "HOLD") return "CONTRADITÓRIO";
+  if (modelVerdict && modelVerdict !== "PASS" && passVerdict === "PASS") return "CONTRADITÓRIO";
+  if (modelVerdict) return modelVerdict;
+  if (passVerdict) return passVerdict;
+  if (isRecord(value.presentation) && Array.isArray(value.presentation.consoleErrors)) {
+    return value.presentation.consoleErrors.length === 0 ? "sem erros" : "HOLD";
+  }
+  return "sem decisão";
+}
+
+function isQaVerdict(value: string | undefined): value is QaVerdict {
+  return value === "PASS" || value === "HOLD" || value === "REVIEW";
 }
 
 function humanDecision(value: string): string | undefined {
   const explicit = value.match(/(?:decis(?:ão|ion)|verdict|status|resultado)\s*[:=-]\s*([a-záéíóú_-]+)/iu)?.[1];
-  if (!explicit) return undefined;
-  const verdict = normaliseVerdict(explicit);
-  return verdict === "carregado" ? undefined : verdict;
+  return explicit ? parseExplicitVerdict(explicit) : undefined;
 }
 
-function normaliseVerdict(value: string): string {
-  const normalised = value.trim().toLowerCase();
-  if (/pass|aprov|approved|sucesso|ok/iu.test(normalised)) return "PASS";
-  if (/hold|fail|block|rejeit|failed|erro/iu.test(normalised)) return "HOLD";
-  if (/review|revis|needs[_ -]?review|manual/iu.test(normalised)) return "REVIEW";
-  return redactSecrets(stripUnsafeText(value)).replace(/[_-]+/gu, " ").trim().slice(0, 48) || "carregado";
+function parseExplicitVerdict(value: string): QaVerdict | undefined {
+  const normalised = value.trim().toLowerCase().replace(/[_-]+/gu, " ").replace(/\s+/gu, " ");
+  if (/^(?:pass|passed|approved|approve|aprovado|aprovada|sucesso|ok)$/u.test(normalised)) return "PASS";
+  if (/^(?:hold|fail|failed|blocked|block|bloqueado|bloqueada|rejeitado|rejeitada|erro)$/u.test(normalised)) return "HOLD";
+  if (/^(?:review|revisão|revisao|needs review|manual|manual review)$/u.test(normalised)) return "REVIEW";
+  return undefined;
 }
 
 function formatEvidence(value: unknown): string {
@@ -306,6 +360,12 @@ function renderEmpty(message: string): string {
   return `<div class="empty-state"><span>—</span><p>${escapeHtml(message)}</p></div>`;
 }
 
+function renderExternalLink(value: string): string {
+  const safe = safeExternalUrl(value);
+  if (!safe) return `<span class="safe-url" aria-label="URL não disponível">URL não disponível</span>`;
+  return `<a class="safe-url" href="${escapeHtml(safe)}" target="_blank" rel="noreferrer noopener">${escapeHtml(displayUrl(safe))}</a>`;
+}
+
 function displayUrl(value: string): string {
   try {
     const safe = safeExternalUrl(value);
@@ -331,17 +391,22 @@ function prepareMarkdown(markdown: string): string {
   return redactSecrets(markdown)
     .replace(/<[^>]*>/gu, "")
     .replace(/javascript\s*:/giu, "")
-    .replace(/data\s*:/giu, "")
-    .replace(/https?:\/\/[^\s<>"']+/giu, (value) => safeExternalUrl(value.replace(/[),.;]+$/gu, "")) ?? "");
+    .replace(/data\s*:/giu, "");
 }
 
 function redactSecrets(value: string): string {
   return value
-    .replace(/https?:\/\/[^\s<>"']+/giu, (candidate) => safeExternalUrl(candidate.replace(/[),.;]+$/gu, "")) ?? "[URL omitido]")
+    .replace(/https?:\/\/[^\s<>"']+/giu, (candidate) => safeUrlReplacement(candidate))
     .replace(/\b(?:run|doc|document)_[a-z0-9][a-z0-9_-]*\b/giu, "[identificador omitido]")
     .replace(/(?:api[_ -]?key|access[_ -]?token|secret|authorization|bearer|password|passwd|cookie|session|private[_ -]?key|auth)\s*[:=]\s*[^\s,;]+/giu, "[conteúdo omitido]")
     .replace(/\b(?:sk|fc)-[a-z0-9][a-z0-9_-]{8,}\b/giu, "[conteúdo omitido]")
     .replace(/(?:\/home\/|\/tmp\/|[A-Z]:\\)[^\s<>"']*/gu, "[caminho omitido]");
+}
+
+function safeUrlReplacement(candidate: string): string {
+  const trailing = candidate.match(/[),.;]+$/u)?.[0] ?? "";
+  const core = trailing ? candidate.slice(0, -trailing.length) : candidate;
+  return `${safeExternalUrl(core) ?? "[URL omitido]"}${trailing}`;
 }
 
 function stripUnsafeText(value: string): string {

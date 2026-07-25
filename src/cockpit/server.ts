@@ -14,7 +14,11 @@ export type CockpitServerOptions = AdapterOptions & {
 
 export function createCockpitServer(options: CockpitServerOptions = {}): Server {
   return createServer(async (request, response) => {
-    await handleCockpitRequest(request, response, options);
+    try {
+      await handleCockpitRequest(request, response, options);
+    } catch {
+      writeSafeError(response, request.method === "HEAD");
+    }
   });
 }
 
@@ -47,8 +51,16 @@ export async function handleCockpitRequest(
   }
 
   const selectedSlug = url.searchParams.get("package") ?? undefined;
-  const model = await loadCockpitModel(options, selectedSlug);
-  const html = renderCockpitHtml(model);
+  try {
+    const model = await loadCockpitModel(options, selectedSlug);
+    const html = renderCockpitHtml(model);
+    writeHtml(response, 200, html, request.method === "HEAD");
+  } catch {
+    writeSafeError(response, request.method === "HEAD");
+  }
+}
+
+function writeHtml(response: ServerResponse, status: number, html: string, head: boolean): void {
   const headers = {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Length": Buffer.byteLength(html, "utf8").toString(),
@@ -57,8 +69,34 @@ export async function handleCockpitRequest(
     "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'",
   };
-  response.writeHead(200, headers);
-  response.end(request.method === "HEAD" ? undefined : html);
+  response.writeHead(status, headers);
+  response.end(head ? undefined : html);
+}
+
+function writeSafeError(response: ServerResponse, head: boolean): void {
+  try {
+    if (response.headersSent) {
+      if (!response.writableEnded) response.end();
+      return;
+    }
+    const html = `<!doctype html>
+<html lang="pt-PT">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cockpit indisponível</title>
+</head>
+<body>
+  <main>
+    <h1>Cockpit indisponível</h1>
+    <p>O read model local não pôde ser carregado neste momento.</p>
+  </main>
+</body>
+</html>`;
+    writeHtml(response, 500, html, head);
+  } catch {
+    if (!response.destroyed) response.destroy();
+  }
 }
 
 export async function startCockpitServer(options: CockpitServerOptions = {}): Promise<Server> {
@@ -128,8 +166,8 @@ function writeText(response: ServerResponse, status: number, text: string, head:
 
 const isEntrypoint = process.argv[1]?.endsWith("/cockpit/server.ts") || process.argv[1]?.endsWith("/cockpit/server.js");
 if (isEntrypoint) {
-  void startCockpitServer().catch((error: unknown) => {
-    console.error(error instanceof Error ? error.message : "Não foi possível iniciar o cockpit.");
+  void startCockpitServer().catch(() => {
+    console.error("Não foi possível iniciar o cockpit.");
     process.exitCode = 1;
   });
 }

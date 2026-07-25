@@ -212,11 +212,17 @@ test("redige QA aninhado, identificadores internos e URLs com credenciais", asyn
 
 test("mantém o veredicto do worker e mostra desacordo entre fontes QA", async () => {
   assert.equal(evidenceDecision({ pass: false, model_verdict: "REVIEW" }), "REVIEW");
-  assert.equal(evidenceDecision({ pass: false, model_verdict: "PASS" }), "PASS");
+  assert.equal(evidenceDecision({ pass: false, model_verdict: "PASS" }), "CONTRADITÓRIO");
   const model = await loadCockpitModel({ dataDir: fixtureRoot });
   const selected = model.selectedPackage;
   assert.ok(selected);
-  selected.qa.canonical.value = { ...selected.qa.canonical.value!, pass: false, diagnosisAllowed: false };
+  selected.qa.canonical.value = {
+    ...selected.qa.canonical.value!,
+    pass: false,
+    minimumAnchorsFound: 2,
+    anchors: selected.qa.canonical.value!.anchors.slice(0, 2),
+    diagnosisAllowed: false,
+  };
   selected.qa.humanNotes.value = "Decisão: REVIEW";
   selected.qa.html[0]!.artifact = { status: "ok", value: { pass: true, model_verdict: "PASS" } };
   const html = renderCockpitHtml(model);

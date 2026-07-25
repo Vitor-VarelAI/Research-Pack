@@ -83,6 +83,10 @@ export type AdapterOptions = {
   maxFileBytes?: number;
   maxRunBytes?: number;
   maxRunLineBytes?: number;
+  maxRadarItems?: number;
+  maxDepth?: number;
+  /** Alias kept for callers that name this budget after path traversal. */
+  maxPathDepth?: number;
   maxPackages?: number;
   /** Alias kept for callers that name this budget after the directory count. */
   maxPackageCount?: number;
