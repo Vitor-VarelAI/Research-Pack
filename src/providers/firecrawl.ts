@@ -90,15 +90,13 @@ export type FirecrawlAgentOptions = {
   urls?: string[];
   schema?: unknown;
   model?: "spark-1-mini" | "spark-1-pro";
-  /** maxAge (ms) for the agent request. `0` forces fresh (research default). */
-  maxAgeMs?: number;
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
 };
 
 export type FirecrawlAgentResult = {
   data: unknown;
-  provenance: { requestedAt: string; maxAgeMs: number | null };
+  provenance: { requestedAt: string };
 };
 
 export type FirecrawlStructuredScrapeOptions = {
@@ -432,7 +430,6 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
   };
 
   const requestedAt = nowIso();
-  const maxAgeMs = options.maxAgeMs;
   const response = await fetch(`${resolved.baseUrl}/agent`, {
     method: "POST",
     headers: {
@@ -444,7 +441,6 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
       ...(options.urls ? { urls: options.urls } : {}),
       ...(options.schema ? { schema: options.schema } : {}),
       ...(options.model ? { model: options.model } : {}),
-      ...(maxAgeMs !== undefined ? { maxAge: maxAgeMs } : {}),
     }),
   });
 
@@ -458,7 +454,7 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
   const parsed = FirecrawlAgentResponseSchema.parse(body);
   if (parsed.success === false) throw new Error(parsed.error ?? "Firecrawl agent failed");
   if (parsed.data !== undefined) {
-    return { data: parsed.data, provenance: { requestedAt, maxAgeMs: maxAgeMs ?? null } };
+    return { data: parsed.data, provenance: { requestedAt } };
   }
   if (!parsed.id) throw new Error(parsed.error ?? "Firecrawl agent did not return data or a job id");
 
@@ -479,7 +475,7 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
     const status = FirecrawlAgentResponseSchema.parse(statusBody);
     if (status.success === false) throw new Error(status.error ?? "Firecrawl agent failed");
     if (status.data !== undefined) {
-      return { data: status.data, provenance: { requestedAt, maxAgeMs: maxAgeMs ?? null } };
+      return { data: status.data, provenance: { requestedAt } };
     }
     if (status.status === "failed" || status.status === "cancelled") throw new Error(`Firecrawl agent ${status.status}`);
   }

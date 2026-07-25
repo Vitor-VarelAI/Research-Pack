@@ -88,11 +88,10 @@ describe("Firecrawl maxAge payload", () => {
     assert.equal(body.maxAge, 0);
   });
 
-  it("agent sends maxAge in payload and returns provenance", async () => {
-    const result = await runFirecrawlAgent({ prompt: "p", schema: {}, model: "spark-1-mini", maxAgeMs: 0 }, { apiKey: "test-key" });
+  it("agent omits unsupported maxAge and returns request provenance", async () => {
+    const result = await runFirecrawlAgent({ prompt: "p", schema: {}, model: "spark-1-mini" }, { apiKey: "test-key" });
     const body = requests[0]?.body as Record<string, unknown>;
-    assert.equal(body.maxAge, 0);
-    assert.equal(result.provenance.maxAgeMs, 0);
+    assert.equal("maxAge" in body, false);
     assert.ok(typeof result.provenance.requestedAt === "string" && result.provenance.requestedAt.length > 0);
   });
 });
@@ -249,7 +248,7 @@ describe("atomic JSON writes", () => {
   });
 });
 
-describe("CLI research/fact-check maxAge default", () => {
+describe("CLI research/fact-check cache controls", () => {
   it("extract-ai defaults to maxAge:0 in the Firecrawl payload", () => {
     const recordFile = path.join(mkdtempSync(path.join(tmpdir(), "cli-rec-")), "record.json");
     const dataDir = mkdtempSync(path.join(tmpdir(), "cli-data-"));
@@ -281,7 +280,7 @@ describe("CLI research/fact-check maxAge default", () => {
     }
   });
 
-  it("agent defaults to maxAge:0 in the Firecrawl payload", () => {
+  it("agent omits unsupported maxAge from the Firecrawl payload", () => {
     const recordFile = path.join(mkdtempSync(path.join(tmpdir(), "cli-rec-")), "record.json");
     const dataDir = mkdtempSync(path.join(tmpdir(), "cli-data-"));
     try {
@@ -304,7 +303,7 @@ describe("CLI research/fact-check maxAge default", () => {
       const recorded = JSON.parse(readFileSync(recordFile, "utf8")) as Array<{ url: string; body: Record<string, unknown> }>;
       const agentReq = recorded.find((r) => r.url.endsWith("/agent"));
       assert.ok(agentReq, "an agent request must have been made");
-      assert.equal(agentReq.body.maxAge, 0);
+      assert.equal("maxAge" in agentReq.body, false);
     } finally {
       rmSync(path.dirname(recordFile), { recursive: true, force: true });
       rmSync(dataDir, { recursive: true, force: true });

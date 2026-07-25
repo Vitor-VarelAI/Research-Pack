@@ -15,7 +15,8 @@
     "lint:editorial": "scripts/editorial-lint.sh",
     "lint:fact": "scripts/fact-check.sh",
     "lint:ptpt": "scripts/ptpt-lint.sh",
-    "qa:content": "scripts/content-qa.sh"
+    "qa:content": "scripts/content-qa.sh",
+    "export:html": "tsx src/export-html.ts"
   },
   "keywords": [
     "scraping",
@@ -27,10 +28,13 @@
   "dependencies": {
     "commander": "^15.0.0",
     "dotenv": "^17.4.2",
+    "marked": "^18.0.6",
+    "sanitize-html": "^2.17.6",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
+    "@types/sanitize-html": "^2.16.1",
     "tsx": "^4.23.0",
     "typescript": "^6.0.3"
   }

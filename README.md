@@ -24,7 +24,29 @@ npm run dev -- extract-ai https://example.com --schema fact-check --prompt "Extr
 npm run dev -- agent "Find the pricing plans for Notion" --url https://www.notion.so/pricing --schema web-research
 npm run dev -- hn-ai --limit 3 --neighbors 10
 npm run dev -- radar-hn --limit 20 --top 120
+npm run export:html -- /absolute/path/to/editorial-package
 ```
+
+## Editorial HTML export
+
+Export a package directory containing `publication.json` and the Markdown files listed by its `formats` entries:
+
+```bash
+npm run export:html -- /absolute/path/to/editorial-package
+# writes /absolute/path/to/editorial-package/index.html atomically
+```
+
+The manifest uses `schemaVersion: 1`, locale `pt-PT`, a slug matching the package directory basename, `publishedOn`, `title`, `description`, exactly 10 slides, and exactly these seven formats: `blog`, `newsletter`, `linkedin`, `xThread`, `shortVideoIdeas`, `carousel`, and `titlesHooks`. Slides have `id`, `eyebrow`, `title`, `bodyMarkdown`, a theme from `ink | paper | sand | blue | red`, and an optional `{ value, label }` stat; the first and last themes are `ink`, there are at least five dark slides, no adjacent themes repeat, and at least two slides have stats. Each format has a `label` and a relative `.md`/`.markdown` `path`; missing files, duplicate paths, traversal, absolute paths, and symlinks are rejected.
+
+The generated file is self-contained: presentation CSS, JavaScript, slide data, and copy payloads are inline, with no runtime CDN or external font/asset requests. Opening the file gives the 10-slide presentation and a same-page `Formatos` mode with plain and rich-text copy controls.
+
+For VPS delivery, copy and byte-verify the complete package under `/home/vitor/share-inbox/exports/vvarelai-editorial-pack/<slug>/`, then get its current public URL with:
+
+```bash
+/home/vitor/file-share/editorial-url.sh <slug>
+```
+
+The public server exposes the editorial export tree read-only; always browser-test the returned HTTPS link before reporting delivery.
 
 ## Content QA
 
@@ -46,6 +68,16 @@ scripts/ptpt-lint.sh draft.md
 ```
 
 Current production fallback: DeepSeek + Z.ai workers for compliance, main agent final pass for PT-PT voice.
+
+## Editorial delivery
+
+`data/` is local working storage. Before declaring an editorial or blog task complete, copy the full package to the shared VPS export folder and verify the copies:
+
+```txt
+/home/vitor/share-inbox/exports/vvarelai-editorial-pack/<date-topic-slug>/
+```
+
+The package includes research, source gate, diagnosis, draft, QA notes, fact-check output, and editorial-lint outputs.
 
 After build:
 

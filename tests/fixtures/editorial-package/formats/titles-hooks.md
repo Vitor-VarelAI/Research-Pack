@@ -1,0 +1,3 @@
+- O produto é o novo tabuleiro
+- A notícia era o sintoma
+- O que muda quando o hábito chega primeiro?
