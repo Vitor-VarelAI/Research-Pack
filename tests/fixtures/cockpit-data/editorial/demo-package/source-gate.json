@@ -1,0 +1,14 @@
+{
+  "pass": true,
+  "minimumAnchorsFound": 3,
+  "needsExtraAnchor": false,
+  "sensitiveCategories": [],
+  "anchors": [
+    {"sourceName":"Fonte oficial","sourceUrl":"https://example.com/source?token=remove","sourceType":"official","confirmedClaims":["Uma afirmação"],"unconfirmedClaims":["Outra afirmação"],"interpretationRisk":"A fonte é primária."},
+    {"sourceName":"Fonte técnica","sourceUrl":"https://example.org/technical","sourceType":"technical","confirmedClaims":["Um mecanismo"],"unconfirmedClaims":[],"interpretationRisk":"Pode mudar."},
+    {"sourceName":"Fonte jornalística","sourceUrl":"https://example.net/news","sourceType":"journalistic","confirmedClaims":["Um contexto"],"unconfirmedClaims":[],"interpretationRisk":"Receção não é prova."}
+  ],
+  "unsupportedClaims": [{"claim":"Isto substitui toda a equipa.","whyUnsupported":"Não há estudo suficiente.","suggestedSourceType":"Estudo independente"}],
+  "diagnosisAllowed": true,
+  "notes":"Notas do gate canónico."
+}

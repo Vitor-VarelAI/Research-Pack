@@ -1,0 +1,5 @@
+{
+  "pass": true,
+  "sources": ["https://example.com/source?tracking=strip"],
+  "model_verdict": "PASS"
+}

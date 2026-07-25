@@ -1,0 +1,4 @@
+not json
+{"id":"internal-run-id-old","command":"radar-hn","output":{"itemCount":1,"items":[]},"createdAt":"2026-07-16T10:00:00.000Z"}
+{"id":"internal-run-id-new","command":"radar-hn","output":{"itemCount":1,"items":[{"title":"Uma história útil","url":"https://example.com/story?utm_source=hidden","source":"hn","sourceUrl":"https://news.ycombinator.com/item?id=123","rank":1,"score":99,"commentsCount":12,"signals":["ai-tool"],"scores":{"novelty":4,"visualStrength":2,"practicalUtility":5,"domainFit":4,"opinionPotential":3,"verificationNeed":1,"timingStrategy":2,"distributionLeverage":3,"moneyIncentive":2},"totalScore":24,"whyCollect":"Tem sinal editorial.","possibleAngles":["Um ângulo"],"strategicQuestions":["Uma pergunta"],"rawSignals":["AI/model/tool signal"]}]},"createdAt":"2026-07-17T10:00:00.000Z"}
+{"id":"internal-run-id-invalid","command":"radar-hn","output":{"items":[{"bad":true}]},"createdAt":"2026-07-18T10:00:00.000Z"}

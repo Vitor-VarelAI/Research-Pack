@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "slug": "demo-package",
+  "locale": "pt-PT",
+  "publishedOn": "2026-07-17",
+  "title": "Uma mesa para escolher melhor",
+  "description": "Um pacote de teste para o cockpit editorial.",
+  "slides": [
+    {"id":"s01","eyebrow":"01 / sinal","title":"O sinal","bodyMarkdown":"A leitura começa aqui.","theme":"ink","stat":{"value":"01","label":"ponto de partida"}},
+    {"id":"s02","eyebrow":"02 / contexto","title":"O contexto","bodyMarkdown":"O contexto muda a decisão.","theme":"paper"},
+    {"id":"s03","eyebrow":"03 / método","title":"O método","bodyMarkdown":"Comparar é trabalho.","theme":"blue"},
+    {"id":"s04","eyebrow":"04 / escolha","title":"A escolha","bodyMarkdown":"A escolha precisa de memória.","theme":"sand"},
+    {"id":"s05","eyebrow":"05 / revisão","title":"A revisão","bodyMarkdown":"Rever impede a pressa.","theme":"red","stat":{"value":"7","label":"formatos"}},
+    {"id":"s06","eyebrow":"06 / ritmo","title":"O ritmo","bodyMarkdown":"O ritmo mantém a atenção.","theme":"paper"},
+    {"id":"s07","eyebrow":"07 / risco","title":"O risco","bodyMarkdown":"O risco fica explícito.","theme":"blue"},
+    {"id":"s08","eyebrow":"08 / entrega","title":"A entrega","bodyMarkdown":"A entrega segue o manifesto.","theme":"sand"},
+    {"id":"s09","eyebrow":"09 / fecho","title":"O fecho","bodyMarkdown":"O fecho deixa uma pergunta.","theme":"red"},
+    {"id":"s10","eyebrow":"10 / fim","title":"Escolher continua a ser o trabalho.","bodyMarkdown":"O critério fecha o ciclo.","theme":"ink"}
+  ],
+  "formats": {
+    "blog":{"label":"Blog","path":"publication/blog.md"},
+    "newsletter":{"label":"Newsletter","path":"publication/newsletter.md"},
+    "linkedin":{"label":"LinkedIn","path":"publication/linkedin.md"},
+    "xThread":{"label":"X / thread","path":"publication/x-thread.md"},
+    "shortVideoIdeas":{"label":"Vídeos","path":"publication/short-video-ideas.md"},
+    "carousel":{"label":"Carrossel","path":"publication/carousel.md"},
+    "titlesHooks":{"label":"Títulos & hooks","path":"publication/titles-hooks.md"}
+  }
+}

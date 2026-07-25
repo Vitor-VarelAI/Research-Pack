@@ -27,6 +27,19 @@ npm run dev -- radar-hn --limit 20 --top 120
 npm run export:html -- /absolute/path/to/editorial-package
 ```
 
+## Visual cockpit
+
+The cockpit is a read-only operational view over existing artifacts. It does not import, execute, or change the scrape pipeline. The default data root is `data/`; point it at an existing runtime data directory with `SCRAPE_AGENT_DATA_DIR`.
+
+```bash
+SCRAPE_AGENT_DATA_DIR=/home/vitor/projects/scrape-agent/data npm run cockpit
+# opens http://127.0.0.1:4173
+```
+
+It accepts only `GET` and `HEAD`, keeps package and artifact paths contained under the configured root, rejects symlink escapes, and degrades individual missing or malformed artifacts into visible warnings. The radar shown in the cockpit is the latest valid global `radar-hn` run because the append-only run record has no package foreign key. It binds to `127.0.0.1` by default; a non-loopback `SCRAPE_AGENT_HOST` requires the explicitly named `SCRAPE_AGENT_ALLOW_UNSAFE_HOST=1` opt-in and emits a startup warning. Artifact reads use `O_NOFOLLOW` and the opened descriptor's `fstat`, but Node has no portable `openat` API, so a concurrent replacement of an intermediate directory remains a residual TOCTOU limitation.
+
+Run the focused cockpit tests with `npm run test:cockpit`; the full suite remains `npm test`.
+
 ## Editorial HTML export
 
 Export a package directory containing `publication.json` and the Markdown files listed by its `formats` entries:
