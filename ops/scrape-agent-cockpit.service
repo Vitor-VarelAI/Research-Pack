@@ -1,0 +1,28 @@
+[Unit]
+Description=Scrape Agent visual cockpit (tailnet-only via Tailscale Serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/vitor/projects/scrape-agent-visual-cockpit
+EnvironmentFile=/home/vitor/.config/scrape-agent-cockpit/env
+ExecStart=/home/vitor/.nvm/versions/node/v24.15.0/bin/node /home/vitor/projects/scrape-agent-visual-cockpit/dist/cockpit/server.js
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=/home/vitor/projects/scrape-agent-visual-cockpit /home/vitor/projects/scrape-agent/data
+InaccessiblePaths=/home/vitor/projects/scrape-agent/.env /home/vitor/.ssh /home/vitor/.docker /home/vitor/.aws /home/vitor/.config/gcloud /home/vitor/.config/gh /home/vitor/.npmrc /home/vitor/.codex /home/vitor/.pi /home/vitor/.claude /home/vitor/.hermes /run/docker.sock
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryHigh=1G
+MemoryMax=2G
+TasksMax=256
+
+[Install]
+WantedBy=default.target

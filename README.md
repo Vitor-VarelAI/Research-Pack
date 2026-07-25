@@ -36,6 +36,24 @@ SCRAPE_AGENT_DATA_DIR=/home/vitor/projects/scrape-agent/data npm run cockpit
 # opens http://127.0.0.1:4173
 ```
 
+For the persistent VPS deployment, install `ops/scrape-agent-cockpit.service` as the `vitor` user at `~/.config/systemd/user/scrape-agent-cockpit.service`. Create the mode `0600` environment file with only non-secret settings, install the unit, and then activate it:
+
+```bash
+install -d -m 700 ~/.config/scrape-agent-cockpit ~/.config/systemd/user
+printf '%s\n' \
+  'SCRAPE_AGENT_DATA_DIR=/home/vitor/projects/scrape-agent/data' \
+  'SCRAPE_AGENT_HOST=127.0.0.1' \
+  'SCRAPE_AGENT_PORT=4173' > ~/.config/scrape-agent-cockpit/env
+chmod 600 ~/.config/scrape-agent-cockpit/env
+install -m 0644 ops/scrape-agent-cockpit.service ~/.config/systemd/user/scrape-agent-cockpit.service
+npm run build
+systemctl --user daemon-reload
+systemctl --user enable --now scrape-agent-cockpit.service
+tailscale serve --bg --yes --https=10000 http://127.0.0.1:4173
+```
+
+Keep the cockpit on `127.0.0.1:4173`; Tailscale Serve is the only remote boundary and must remain tailnet-only. The existing Studio mapping on HTTPS `:443` must stay unchanged, port `8443` is reserved, and Funnel must not be enabled. The cockpit URL is `https://vmi3305438.tail917695.ts.net:10000/`. To roll back only this deployment, run `tailscale serve --https=10000 off`, then `systemctl --user disable --now scrape-agent-cockpit.service` and remove the installed unit/env after preserving any needed backups; never use `tailscale serve reset`.
+
 It accepts only `GET` and `HEAD`, keeps package and artifact paths contained under the configured root, rejects symlink escapes, and degrades individual missing or malformed artifacts into visible warnings. The radar shown in the cockpit is the latest valid global `radar-hn` run because the append-only run record has no package foreign key. It binds to `127.0.0.1` by default; a non-loopback `SCRAPE_AGENT_HOST` requires the explicitly named `SCRAPE_AGENT_ALLOW_UNSAFE_HOST=1` opt-in and emits a startup warning. Artifact reads use `O_NOFOLLOW` and the opened descriptor's `fstat`, but Node has no portable `openat` API, so a concurrent replacement of an intermediate directory remains a residual TOCTOU limitation.
 
 Run the focused cockpit tests with `npm run test:cockpit`; the full suite remains `npm test`.
