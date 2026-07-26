@@ -597,7 +597,12 @@ export function createFirecrawlCollector(
       }));
       return {
         anchors,
-        sourceText: boundUtf8(anchors.map((anchor) => anchor.text).join("\n\n"), MAX_PRODUCTION_SOURCE_TEXT_BYTES),
+        sourceText: boundUtf8(anchors.map((anchor) => [
+          `Canonical source URL: ${anchor.sourceUrl}`,
+          `Source title: ${anchor.title}`,
+          "Source text:",
+          anchor.text,
+        ].join("\n")).join("\n\n"), MAX_PRODUCTION_SOURCE_TEXT_BYTES),
       };
     },
   };

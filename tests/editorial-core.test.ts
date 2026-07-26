@@ -465,6 +465,7 @@ describe("production Firecrawl collector", () => {
       "https://policy.example/report",
     ]);
     assert.equal(result.anchors.length, 4);
+    for (const url of scraped) assert.match(result.sourceText ?? "", new RegExp(url.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"), "u"));
   });
 
   it("aborts discovery without scraping or returning a late collection", async () => {
