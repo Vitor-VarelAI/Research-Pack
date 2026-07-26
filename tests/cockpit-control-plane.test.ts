@@ -233,7 +233,7 @@ test("incomplete structured QA remains undecided in the safe review model", asyn
     const job = await store.create(input);
     await store.writeArtifact(job.id, "draft.json", JSON.stringify({ title: "Draft", description: "Descrição", bodyMarkdown: "# Draft", claims: [] }));
     const themes = ["ink", "paper", "blue", "sand", "red", "paper", "blue", "sand", "red", "ink"];
-    await store.writeArtifact(job.id, "formats.json", JSON.stringify({ newsletter: "N", linkedin: "L", xThread: "X", shortVideoIdeas: "V", carousel: "C", titlesHooks: "T", slides: themes.map((theme, index) => ({ id: `slide-${index}`, eyebrow: "E", title: "T", bodyMarkdown: "B", theme })) }));
+    await store.writeArtifact(job.id, "formats.json", JSON.stringify({ newsletter: "N", linkedin: "L", xThread: "X", shortVideoIdeas: "V", carousel: "C", titlesHooks: "T", slides: themes.map((theme, index) => ({ id: `slide-${index}`, eyebrow: "E", title: "T", bodyMarkdown: "B", theme, ...(index === 0 || index === 4 ? { stat: { value: String(index), label: "valor" } } : {}) })) }));
     await store.writeArtifact(job.id, "qa.json", JSON.stringify({ passed: true, warnings: [], checkedClaims: 0, sourceUrls: [] }));
     assert.equal((await toSafeJob(store, job)).review?.qaVerdict, "SEM DECISÃO");
   } finally { await rm(root, { recursive: true, force: true }); }

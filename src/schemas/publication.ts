@@ -28,6 +28,34 @@ export const PublicationSlideSchema = z.object({
   stat: PublicationStatSchema.optional(),
 }).strict();
 
+export const PublicationSlidesSchema = z.array(PublicationSlideSchema).length(10).superRefine((slides, context) => {
+  const slideIds = slides.map((slide) => slide.id);
+  if (new Set(slideIds).size !== slideIds.length) {
+    context.addIssue({ code: "custom", message: "Slide ids must be unique" });
+  }
+
+  const themes = slides.map((slide) => slide.theme);
+  if (themes[0] !== "ink") {
+    context.addIssue({ code: "custom", path: [0, "theme"], message: "The first slide must use the ink theme" });
+  }
+  if (themes[themes.length - 1] !== "ink") {
+    context.addIssue({ code: "custom", path: [themes.length - 1, "theme"], message: "The last slide must use the ink theme" });
+  }
+  const darkSlideCount = themes.filter((theme) => theme === "ink" || theme === "blue" || theme === "red").length;
+  if (darkSlideCount < 5) {
+    context.addIssue({ code: "custom", message: "At least five slides must use a dark theme" });
+  }
+  for (let index = 1; index < themes.length; index += 1) {
+    if (themes[index] === themes[index - 1]) {
+      context.addIssue({ code: "custom", path: [index, "theme"], message: "Adjacent slides must not use the same theme" });
+    }
+  }
+  const statCount = slides.filter((slide) => slide.stat !== undefined).length;
+  if (statCount < 2) {
+    context.addIssue({ code: "custom", message: "At least two slides must include a stat" });
+  }
+});
+
 const FormatEntrySchema = z.object({
   label: z.string().trim().min(1),
   path: RelativeMarkdownPathSchema,
@@ -50,35 +78,9 @@ export const PublicationSchema = z.object({
   publishedOn: z.string().date(),
   title: z.string().trim().min(1),
   description: z.string().trim().min(1),
-  slides: z.array(PublicationSlideSchema).length(10),
+  slides: PublicationSlidesSchema,
   formats: PublicationFormatsSchema,
-}).strict().superRefine((publication, context) => {
-  const slideIds = publication.slides.map((slide) => slide.id);
-  if (new Set(slideIds).size !== slideIds.length) {
-    context.addIssue({ code: "custom", path: ["slides"], message: "Slide ids must be unique" });
-  }
-
-  const themes = publication.slides.map((slide) => slide.theme);
-  if (themes[0] !== "ink") {
-    context.addIssue({ code: "custom", path: ["slides", 0, "theme"], message: "The first slide must use the ink theme" });
-  }
-  if (themes[themes.length - 1] !== "ink") {
-    context.addIssue({ code: "custom", path: ["slides", themes.length - 1, "theme"], message: "The last slide must use the ink theme" });
-  }
-  const darkSlideCount = themes.filter((theme) => theme === "ink" || theme === "blue" || theme === "red").length;
-  if (darkSlideCount < 5) {
-    context.addIssue({ code: "custom", path: ["slides"], message: "At least five slides must use a dark theme" });
-  }
-  for (let index = 1; index < themes.length; index += 1) {
-    if (themes[index] === themes[index - 1]) {
-      context.addIssue({ code: "custom", path: ["slides", index, "theme"], message: "Adjacent slides must not use the same theme" });
-    }
-  }
-  const statCount = publication.slides.filter((slide) => slide.stat !== undefined).length;
-  if (statCount < 2) {
-    context.addIssue({ code: "custom", path: ["slides"], message: "At least two slides must include a stat" });
-  }
-});
+}).strict();
 
 export type Publication = z.infer<typeof PublicationSchema>;
 export type PublicationFormatId = keyof z.infer<typeof PublicationFormatsSchema>;

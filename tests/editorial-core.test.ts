@@ -96,6 +96,22 @@ describe("editorial control-plane contracts", () => {
     assert.throws(() => assertEditorialJobTransition("queued", "completed"));
     assert.throws(() => assertEditorialJobTransition("awaiting_final_approval", "drafting"));
   });
+
+  it("rejects editorial slides that cannot be promoted to the publication schema", () => {
+    const invalidSlides = slides().map((slide) => ({ ...slide }));
+    invalidSlides[0] = { ...invalidSlides[0]!, theme: "blue" };
+    invalidSlides[9] = { ...invalidSlides[9]!, theme: "red" };
+    delete invalidSlides[4]!.stat;
+    assert.throws(() => EditorialFormatsSchema.parse({
+      newsletter: "Newsletter",
+      linkedin: "LinkedIn",
+      xThread: "Thread",
+      shortVideoIdeas: "Vídeo",
+      carousel: "Carrossel",
+      titlesHooks: "Hooks",
+      slides: invalidSlides,
+    }), /first slide|last slide|two slides/iu);
+  });
 });
 
 describe("job store", () => {
@@ -721,6 +737,9 @@ describe("production DeepSeek QA", () => {
       const result = await runWithChecks(root, qaCheck(true, "PASS"), qaCheck(true, "PASS"));
       assert.equal(result.state, "awaiting_final_approval");
       assert.match(result.calls[0] ?? "", /one anchor object for every canonical source/iu);
+      const formatsCall = result.calls.find((call) => call.includes("Stage: formats.")) ?? "";
+      assert.match(formatsCall, /first and last slide must use the ink theme/iu);
+      assert.match(formatsCall, /at least two slides must include a stat drawn only from sourced facts/iu);
       const formatsQaCall = result.calls.find((call) => call.includes("fixed structured formats QA")) ?? "";
       assert.match(formatsQaCall, /exactly ten publication slides are required/iu);
       assert.match(formatsQaCall, /do not require sourceUrls on format strings or slide objects/iu);
