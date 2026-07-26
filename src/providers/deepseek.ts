@@ -134,8 +134,10 @@ export function createDeepSeekClient(config: DeepSeekConfig, options: DeepSeekCl
 export const createDeepSeekHttpClient = createDeepSeekClient;
 
 const DeepSeekResponseSchema = z.object({
-  choices: z.array(z.object({ message: z.object({ content: z.string().min(1) }).strict() }).strict()).min(1),
-}).strict();
+  choices: z.array(z.object({
+    message: z.object({ content: z.string().min(1) }),
+  })).min(1),
+});
 
 async function readBoundedText(response: Response, maxBytes: number): Promise<string> {
   if (!response.body) return "";

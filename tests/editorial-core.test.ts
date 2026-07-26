@@ -156,6 +156,30 @@ describe("direct DeepSeek client", () => {
     await assert.rejects(() => failing.completeJson({ messages: [{ role: "user", content: "x" }], schema: z.object({ ok: z.boolean() }) }), (error: unknown) => error instanceof DeepSeekRequestError && !error.message.includes("do-not-leak"));
   });
 
+  it("accepts standard DeepSeek metadata around the assistant JSON content", async () => {
+    const client = createDeepSeekClient({ apiKey: "secret-key", baseUrl: "http://127.0.0.1:9999/v1", model: "deepseek-v4-pro" }, {
+      fetchImpl: async () => Response.json({
+        id: "chatcmpl-safe",
+        object: "chat.completion",
+        created: 1_774_560_000,
+        model: "deepseek-v4-pro",
+        choices: [{
+          index: 0,
+          finish_reason: "stop",
+          message: {
+            role: "assistant",
+            reasoning_content: "internal reasoning",
+            content: JSON.stringify({ ok: true }),
+          },
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+      }),
+    });
+
+    const result = await client.completeJson({ messages: [{ role: "user", content: "data" }], schema: z.object({ ok: z.boolean() }) });
+    assert.deepEqual(result, { ok: true });
+  });
+
   it("maps an aborted local request to a safe cancellation", async () => {
     const client = createDeepSeekClient({ apiKey: "secret", baseUrl: "http://127.0.0.1:9999/v1", model: "deepseek-v4-pro" }, { fetchImpl: async (_url, init) => await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")))) });
     const controller = new AbortController();
