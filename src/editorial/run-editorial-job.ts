@@ -252,9 +252,10 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
       const current = await options.store.transition(jobId, target, {
         error: null,
         failedStage: null,
-        stageSummaries: stageRunning(job.stageSummaries, target),
+        stageSummaries: target === "source_gate" ? job.stageSummaries : stageRunning(job.stageSummaries, target),
       }, { revision: job.revision, state: job.state });
       if (target === "researching") return await executeResearch(current, execution);
+      if (target === "source_gate") return await executeAngles(current, execution);
       const angles = await readArtifact(jobId, "angles.json", EditorialAngleCandidatesSchema.parse);
       const selected = current.selectedAngle;
       if (target === "diagnosing") {
@@ -291,10 +292,20 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
       return options.store.transition(current.id, "failed", { error, failedStage: "source_gate" }, { revision: current.revision, state: "source_gate" });
     }
     current = await completeStage(current.id, "source_gate", gateRef);
+    return executeAngles(current, execution, researchPack);
+  }
+
+  async function executeAngles(job: EditorialJob, execution: Execution, persistedResearchPack?: EditorialResearchPack): Promise<EditorialJob> {
+    assertExecution(job, execution, "source_gate");
+    const researchPack = persistedResearchPack ?? await readArtifact(job.id, "research-pack.json", EditorialResearchPackSchema.parse);
+    const persistedGate = await readArtifact(job.id, "source-gate.json", SourceGateResultSchema.parse);
+    assertCanonicalSourceGate(calculateCanonicalSourceGate(job.input, researchPack.anchors), researchPack.sourceGate);
+    assertCanonicalSourceGate(researchPack.sourceGate, persistedGate);
+    if (!researchPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows angle generation");
     const anglesRaw = await options.generation.angles({ job: job.input, researchPack, signal: execution.controller.signal });
     const angles = validateEditorialAngleCandidates(anglesRaw, researchPack.anchors);
     const anglesRef = await writeJsonArtifact(job.id, "angles.json", angles, execution, "source_gate");
-    current = await addArtifact(current.id, anglesRef, "source_gate");
+    const current = await addArtifact(job.id, anglesRef, "source_gate");
     return options.store.transition(current.id, "awaiting_angle", {}, { revision: current.revision, state: "source_gate" });
   }
 
@@ -840,8 +851,9 @@ function stageForState(state: EditorialJob["state"]): EditorialJobStage | null {
   return ["researching", "source_gate", "diagnosing", "drafting", "formatting", "qa"].includes(state) ? state as EditorialJobStage : null;
 }
 
-function retryStage(job: EditorialJob): "researching" | "diagnosing" | "drafting" | "formatting" {
+function retryStage(job: EditorialJob): "researching" | "source_gate" | "diagnosing" | "drafting" | "formatting" {
   if (job.error?.code === "human_rejected") return "drafting";
+  if (job.failedStage === "source_gate" && job.error?.code !== "source_gate_blocked" && job.stageSummaries.source_gate.status === "completed") return "source_gate";
   if (job.failedStage === "researching" || job.failedStage === "source_gate" || job.failedStage === null) return "researching";
   if (job.failedStage === "qa") return "drafting";
   return job.failedStage;

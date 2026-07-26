@@ -151,7 +151,9 @@ describe("direct DeepSeek client", () => {
     assert.deepEqual(result, { ok: true });
     assert.equal(request?.method, "POST");
     assert.equal(request?.headers.get("authorization"), "Bearer secret-key");
-    assert.equal((JSON.parse(await request!.text()) as { response_format: { type: string }; model: string }).response_format.type, "json_object");
+    const body = JSON.parse(await request!.text()) as { response_format: { type: string }; thinking?: { type: string }; model: string };
+    assert.equal(body.response_format.type, "json_object");
+    assert.deepEqual(body.thinking, { type: "disabled" });
     const failing = createDeepSeekClient({ apiKey: "do-not-leak", baseUrl: "http://127.0.0.1:9999/v1", model: "deepseek-v4-pro" }, { fetchImpl: async () => new Response("do-not-leak raw provider body", { status: 500 }) });
     await assert.rejects(() => failing.completeJson({ messages: [{ role: "user", content: "x" }], schema: z.object({ ok: z.boolean() }) }), (error: unknown) => error instanceof DeepSeekRequestError && !error.message.includes("do-not-leak"));
   });
@@ -280,6 +282,41 @@ describe("mocked runner", () => {
       assert.equal(failed.state, "failed");
       assert.equal(failed.error?.code, "source_gate_blocked");
       assert.equal(anglesCalled, false);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("retries angle generation from a passed source gate without repeating collection or research", async () => {
+    const root = await tempName("editorial-angle-retry-");
+    try {
+      const generated = generation();
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      let collectionCalls = 0;
+      let researchCalls = 0;
+      let angleCalls = 0;
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => { collectionCalls += 1; return { anchors: generated.research.anchors }; } },
+        generation: {
+          research: async () => { researchCalls += 1; return generated.research; },
+          angles: async () => {
+            angleCalls += 1;
+            if (angleCalls === 1) throw Object.assign(new Error("DeepSeek request failed"), { code: "provider_http" });
+            return generated.angles;
+          },
+          diagnosis: async () => generated.diagnosis,
+          draft: async () => generated.draft,
+          formats: async () => generated.formats,
+        },
+        packageWriter: createPackageWriter(root),
+      });
+
+      const failed = await runner.start(input);
+      assert.equal(failed.state, "failed");
+      assert.equal(failed.failedStage, "source_gate");
+      assert.equal((await runner.retry(failed.id)).state, "awaiting_angle");
+      assert.equal(collectionCalls, 1);
+      assert.equal(researchCalls, 1);
+      assert.equal(angleCalls, 2);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

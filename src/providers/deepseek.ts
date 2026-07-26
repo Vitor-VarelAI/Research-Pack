@@ -83,6 +83,7 @@ export function createDeepSeekClient(config: DeepSeekConfig, options: DeepSeekCl
       const body = {
         model: resolved.model,
         messages,
+        thinking: { type: "disabled" },
         response_format: { type: "json_object" },
         ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
       };
