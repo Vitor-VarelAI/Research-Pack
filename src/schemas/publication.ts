@@ -50,10 +50,6 @@ export const PublicationSlidesSchema = z.array(PublicationSlideSchema).length(10
       context.addIssue({ code: "custom", path: [index, "theme"], message: "Adjacent slides must not use the same theme" });
     }
   }
-  const statCount = slides.filter((slide) => slide.stat !== undefined).length;
-  if (statCount < 2) {
-    context.addIssue({ code: "custom", message: "At least two slides must include a stat" });
-  }
 });
 
 const FormatEntrySchema = z.object({

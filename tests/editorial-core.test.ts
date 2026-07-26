@@ -97,21 +97,6 @@ describe("editorial control-plane contracts", () => {
     assert.throws(() => assertEditorialJobTransition("awaiting_final_approval", "drafting"));
   });
 
-  it("rejects editorial slides that cannot be promoted to the publication schema", () => {
-    const invalidSlides = slides().map((slide) => ({ ...slide }));
-    invalidSlides[0] = { ...invalidSlides[0]!, theme: "blue" };
-    invalidSlides[9] = { ...invalidSlides[9]!, theme: "red" };
-    delete invalidSlides[4]!.stat;
-    assert.throws(() => EditorialFormatsSchema.parse({
-      newsletter: "Newsletter",
-      linkedin: "LinkedIn",
-      xThread: "Thread",
-      shortVideoIdeas: "Vídeo",
-      carousel: "Carrossel",
-      titlesHooks: "Hooks",
-      slides: invalidSlides,
-    }), /first slide|last slide|two slides/iu);
-  });
 });
 
 describe("job store", () => {
@@ -231,11 +216,22 @@ describe("mocked runner", () => {
     const root = await tempName("editorial-runner-");
     try {
       const generated = generation();
+      const modelFormats = EditorialFormatsSchema.parse({
+        ...generated.formats,
+        slides: generated.formats.slides.map((slide, index) => {
+          const { stat: _stat, ...content } = slide;
+          return {
+            ...content,
+            id: `model-slide-${index + 1}`,
+            theme: index === 0 ? "blue" : index === 9 ? "red" : slide.theme,
+          };
+        }),
+      });
       const store = createJobStore({ rootDir: path.join(root, "control", "jobs") });
       const runner = createEditorialRunner({
         store,
         collector: { collect: async () => ({ anchors: generated.research.anchors, sourceText: "sources" }) },
-        generation: { research: async () => generated.research, angles: async () => generated.angles, diagnosis: async () => generated.diagnosis, draft: async () => generated.draft, formats: async () => generated.formats, qa: async () => generatedQa(generated) },
+        generation: { research: async () => generated.research, angles: async () => generated.angles, diagnosis: async () => generated.diagnosis, draft: async () => generated.draft, formats: async () => modelFormats, qa: async () => generatedQa(generated) },
         packageWriter: createPackageWriter(root),
       });
       const first = await runner.start(input);
@@ -245,7 +241,14 @@ describe("mocked runner", () => {
       assert.equal(second.state, "awaiting_final_approval");
       const complete = await runner.approve(second.id);
       assert.equal(complete.state, "completed");
-      assert.match(await readFile(path.join(root, "editorial", "pacote-de-teste", "publication.json"), "utf8"), /Pacote de teste/);
+      const publication = JSON.parse(await readFile(path.join(root, "editorial", "pacote-de-teste", "publication.json"), "utf8")) as {
+        title: string;
+        slides: Array<{ id: string; theme: string; stat?: unknown }>;
+      };
+      assert.equal(publication.title, "Pacote de teste");
+      assert.deepEqual(publication.slides.map((slide) => slide.id), Array.from({ length: 10 }, (_, index) => `slide-${index + 1}`));
+      assert.deepEqual(publication.slides.map((slide) => slide.theme), ["ink", "paper", "blue", "sand", "red", "paper", "blue", "sand", "red", "ink"]);
+      assert.equal(publication.slides.some((slide) => slide.stat !== undefined), false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -738,8 +741,8 @@ describe("production DeepSeek QA", () => {
       assert.equal(result.state, "awaiting_final_approval");
       assert.match(result.calls[0] ?? "", /one anchor object for every canonical source/iu);
       const formatsCall = result.calls.find((call) => call.includes("Stage: formats.")) ?? "";
-      assert.match(formatsCall, /first and last slide must use the ink theme/iu);
-      assert.match(formatsCall, /at least two slides must include a stat drawn only from sourced facts/iu);
+      assert.match(formatsCall, /slide ids and themes are normalized deterministically by the application/iu);
+      assert.match(formatsCall, /include a stat only when a sourced fact/iu);
       const formatsQaCall = result.calls.find((call) => call.includes("fixed structured formats QA")) ?? "";
       assert.match(formatsQaCall, /exactly ten publication slides are required/iu);
       assert.match(formatsQaCall, /do not require sourceUrls on format strings or slide objects/iu);

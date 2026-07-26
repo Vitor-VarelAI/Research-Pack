@@ -54,6 +54,8 @@ const FORMAT_PATHS = {
   titlesHooks: "publication/titles-hooks.md",
 } as const;
 
+const PUBLICATION_THEME_SEQUENCE = ["ink", "paper", "blue", "sand", "red", "paper", "blue", "sand", "red", "ink"] as const;
+
 export function createPackageWriter(dataRoot: string, options: { exportHtml?: boolean } = {}): PackageWriter {
   const root = path.resolve(dataRoot);
   const editorialRoot = path.join(root, "editorial");
@@ -102,7 +104,11 @@ export async function writeEditorialPackage(input: EditorialPackageWriteInput, d
       publishedOn: job.createdAt.slice(0, 10),
       title: draft.title,
       description: draft.description,
-      slides: formats.slides,
+      slides: formats.slides.map((slide, index) => ({
+        ...slide,
+        id: `slide-${index + 1}`,
+        theme: PUBLICATION_THEME_SEQUENCE[index]!,
+      })),
       formats: {
         blog: { label: "Blog", path: FORMAT_PATHS.blog },
         newsletter: { label: "Newsletter", path: FORMAT_PATHS.newsletter },

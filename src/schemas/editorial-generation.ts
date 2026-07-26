@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { EditorialUrlSchema } from "./editorial-job.js";
-import { PublicationSlidesSchema } from "./publication.js";
+import { PublicationSlideSchema } from "./publication.js";
 import { SourceGateResultSchema } from "./source-gate.js";
 
 export const EditorialResearchAnchorSchema = z.object({
@@ -100,7 +100,7 @@ export const EditorialFormatsSchema = z.object({
   shortVideoIdeas: EditorialDerivativeSchema,
   carousel: EditorialDerivativeSchema,
   titlesHooks: EditorialDerivativeSchema,
-  slides: PublicationSlidesSchema,
+  slides: z.array(PublicationSlideSchema).length(10),
 }).strict();
 export type EditorialFormats = z.infer<typeof EditorialFormatsSchema>;
 

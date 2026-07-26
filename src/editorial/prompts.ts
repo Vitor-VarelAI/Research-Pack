@@ -23,7 +23,7 @@ export function buildDraftPrompt(research: EditorialResearchPack, diagnosis: Edi
 }
 
 export function buildFormatsPrompt(draft: EditorialDraft, diagnosis: EditorialDiagnosis): string {
-  return `${EDITORIAL_SYSTEM_PROMPT}\n\nStage: formats. Return six derivative texts and exactly ten publication slides. The first and last slide must use the ink theme, adjacent slides must use different themes, and at least five slides must use ink, blue or red. At least two slides must include a stat drawn only from sourced facts already present in the draft; never invent a number to satisfy the layout. Keep locale, slug, paths, filenames and publication manifest decisions to the application code.\n${delimit("draft", JSON.stringify(draft))}\n${delimit("diagnosis", JSON.stringify(diagnosis))}`;
+  return `${EDITORIAL_SYSTEM_PROMPT}\n\nStage: formats. Return six derivative texts and exactly ten publication slides. Slide IDs and themes are normalized deterministically by the application. Include a stat only when a sourced fact already present in the draft naturally supports it; never invent a number for the layout. Keep locale, slug, paths, filenames and publication manifest decisions to the application code.\n${delimit("draft", JSON.stringify(draft))}\n${delimit("diagnosis", JSON.stringify(diagnosis))}`;
 }
 
 export function buildEditorialQaPrompt(research: EditorialResearchPack, draft: EditorialDraft): string {

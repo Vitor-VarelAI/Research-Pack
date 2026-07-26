@@ -139,11 +139,6 @@ describe("export:html", () => {
         mutate: (packageDir) => updateManifest(packageDir, (manifest) => { manifest.slides[0].theme = "paper"; }),
         message: /first slide/i,
       },
-      {
-        name: "too few stats",
-        mutate: (packageDir) => updateManifest(packageDir, (manifest) => { delete manifest.slides[4].stat; }),
-        message: /two slides.*stat/i,
-      },
     ];
 
     for (const testCase of cases) {
