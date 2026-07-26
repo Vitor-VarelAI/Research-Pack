@@ -1,6 +1,14 @@
 import { rm } from "node:fs/promises";
 import { z } from "zod";
-import { runFirecrawlAgent, createFirecrawlProvider, type FirecrawlAgentOptions, type FirecrawlAgentResult } from "../providers/firecrawl.js";
+import {
+  runFirecrawlAgent,
+  searchFirecrawl,
+  createFirecrawlProvider,
+  type FirecrawlAgentOptions,
+  type FirecrawlAgentResult,
+  type FirecrawlSearchOptions,
+  type FirecrawlSearchResult,
+} from "../providers/firecrawl.js";
 import { WebResearchExtractionSchema } from "../schemas/web-research.js";
 import type { CrawlProvider, ScrapedDocument } from "../types.js";
 import { createDeepSeekClient, resolveDeepSeekConfig, type DeepSeekClient } from "../providers/deepseek.js";
@@ -460,7 +468,11 @@ export function createProductionEditorialRunner(
       const firecrawl = createFirecrawlProvider(firecrawlConfig);
       resolved = createEditorialRunner({
         store: createJobStore(dataRoot),
-        collector: createProductionFirecrawlCollector(firecrawl, (options) => runFirecrawlAgent(options, firecrawlConfig)),
+        collector: createProductionFirecrawlCollector(
+          firecrawl,
+          (options) => runFirecrawlAgent(options, firecrawlConfig),
+          (options) => searchFirecrawl(options, firecrawlConfig),
+        ),
         generation: createDeepSeekGeneration(deepseek),
         packageWriter: createPackageWriter(dataRoot),
         logger,
@@ -490,8 +502,10 @@ function isHttpProviderUrl(value: string | undefined): boolean {
 }
 
 export type FirecrawlDiscovery = (options: FirecrawlAgentOptions) => Promise<FirecrawlAgentResult>;
+export type FirecrawlSearch = (options: FirecrawlSearchOptions) => Promise<FirecrawlSearchResult>;
 
 export const MAX_PRODUCTION_DISCOVERY_SOURCES = 6;
+export const MAX_PRODUCTION_SEARCH_RESULTS = MAX_PRODUCTION_DISCOVERY_SOURCES - 1;
 export const MAX_PRODUCTION_SOURCE_TEXT_BYTES = 400_000;
 export const MAX_PRODUCTION_ANCHOR_TEXT_BYTES = 100_000;
 
@@ -502,11 +516,21 @@ const ProductionDiscoverySchema = WebResearchExtractionSchema.extend({
 const ProductionDiscoveryJsonSchema = stripJsonSchemaMeta(z.toJSONSchema(ProductionDiscoverySchema));
 const PRODUCTION_DISCOVERY_PROMPT = "Find three to six useful independent web sources for the supplied topic. Return only the existing web-research JSON contract. Return HTTP(S) URLs only, never credentials or private targets, and do not invent URLs.";
 
-export function createProductionFirecrawlCollector(provider: CrawlProvider, discover: FirecrawlDiscovery = runFirecrawlAgent, resolveHost?: PublicHostResolver): EditorialCollector {
-  return createFirecrawlCollector(provider, discover, resolveHost ?? systemPublicHostResolver);
+export function createProductionFirecrawlCollector(
+  provider: CrawlProvider,
+  discover: FirecrawlDiscovery = runFirecrawlAgent,
+  search: FirecrawlSearch = searchFirecrawl,
+  resolveHost?: PublicHostResolver,
+): EditorialCollector {
+  return createFirecrawlCollector(provider, discover, search, resolveHost ?? systemPublicHostResolver);
 }
 
-export function createFirecrawlCollector(provider: CrawlProvider, discover: FirecrawlDiscovery = runFirecrawlAgent, resolveHost?: PublicHostResolver): EditorialCollector {
+export function createFirecrawlCollector(
+  provider: CrawlProvider,
+  discover: FirecrawlDiscovery = runFirecrawlAgent,
+  search: FirecrawlSearch = searchFirecrawl,
+  resolveHost?: PublicHostResolver,
+): EditorialCollector {
   return {
     async collect(rawInput, signal) {
       const input = EditorialJobInputSchema.parse(rawInput);
@@ -519,7 +543,14 @@ export function createFirecrawlCollector(provider: CrawlProvider, discover: Fire
         const document = await provider.scrape(url, { maxAgeMs: 0, signal });
         throwIfAborted(signal);
         seed = { url, document };
-        discoveredSources = document.links;
+        const result = await search({
+          query: buildRelatedSearchQuery(seed),
+          limit: MAX_PRODUCTION_SEARCH_RESULTS,
+          excludeDomains: [new URL(url).hostname],
+          signal,
+        });
+        throwIfAborted(signal);
+        discoveredSources = result.urls;
       } else {
         const result = await discover({
           prompt: `${PRODUCTION_DISCOVERY_PROMPT}\n${delimit("topic", input.topic)}\n${delimit("context", input.context)}`,
@@ -663,9 +694,17 @@ function parseBoundedDiscovery(value: unknown): z.infer<typeof ProductionDiscove
   return ProductionDiscoverySchema.parse({ ...parsed, sources: parsed.sources.slice(0, MAX_PRODUCTION_DISCOVERY_SOURCES) });
 }
 
+function buildRelatedSearchQuery(seed: { url: string; document: ScrapedDocument }): string {
+  const fallback = new URL(seed.url).pathname.split("/").filter(Boolean).join(" ") || new URL(seed.url).hostname;
+  const query = (seed.document.title?.trim() || fallback).replace(/\s+/gu, " ").trim();
+  return query.slice(0, 500);
+}
+
 function canonicalDiscoveryUrls(input: EditorialJobInput, discovered: readonly string[]): string[] {
   const raw = input.kind === "url" ? [input.url, ...discovered] : [...discovered];
   const seen = new Set<string>();
+  const seenHosts = new Set<string>();
+  const seed = input.kind === "url" ? canonicalEditorialUrl(input.url) : undefined;
   const urls: string[] = [];
   for (const candidate of raw) {
     const parsed = z.string().url().safeParse(candidate);
@@ -675,7 +714,13 @@ function canonicalDiscoveryUrls(input: EditorialJobInput, discovered: readonly s
       if (!safe.success) continue;
       const canonical = canonicalEditorialUrl(candidate);
       if (seen.has(canonical)) continue;
+      const candidateUrl = new URL(canonical);
+      if (seed && canonical !== seed) {
+        if (isLikelyNavigationOrPolicyUrl(candidateUrl)) continue;
+        if (seenHosts.has(candidateUrl.hostname)) continue;
+      }
       seen.add(canonical);
+      seenHosts.add(candidateUrl.hostname);
       urls.push(canonical);
       if (urls.length >= MAX_PRODUCTION_DISCOVERY_SOURCES) break;
     } catch {
@@ -683,6 +728,10 @@ function canonicalDiscoveryUrls(input: EditorialJobInput, discovered: readonly s
     }
   }
   return urls;
+}
+
+function isLikelyNavigationOrPolicyUrl(url: URL): boolean {
+  return /(?:^|\/)(?:author|authors|category|categories|cookie-policy(?:-[a-z]{2})?|privacy-policy|tag|tags)(?:\/|$)/iu.test(url.pathname);
 }
 
 function boundUtf8(value: string, maxBytes: number): string {

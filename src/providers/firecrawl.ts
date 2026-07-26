@@ -38,6 +38,20 @@ const FirecrawlMapResponseSchema = z.object({
   error: z.string().optional(),
 });
 
+const FirecrawlSearchResultSchema = z.object({
+  url: z.string().url(),
+  title: z.string().optional(),
+  description: z.string().optional(),
+});
+
+const FirecrawlSearchResponseSchema = z.object({
+  success: z.boolean().optional(),
+  data: z.object({
+    web: z.array(FirecrawlSearchResultSchema).optional(),
+  }).optional(),
+  error: z.string().optional(),
+});
+
 const FirecrawlCrawlStartResponseSchema = z.object({
   success: z.boolean().optional(),
   id: z.string().optional(),
@@ -111,6 +125,17 @@ export type FirecrawlAgentOptions = {
 export type FirecrawlAgentResult = {
   data: unknown;
   provenance: { requestedAt: string };
+};
+
+export type FirecrawlSearchOptions = {
+  query: string;
+  limit?: number;
+  excludeDomains?: string[];
+  signal?: AbortSignal;
+};
+
+export type FirecrawlSearchResult = {
+  urls: string[];
 };
 
 export type FirecrawlStructuredScrapeOptions = {
@@ -436,6 +461,50 @@ export async function scrapeFirecrawlStructured(
   const provenance = buildProvenance(requestedAt, maxAgeMs, parsed);
   const document = toDocument(options.url, parsed.data, provenance);
   return { document, data: parsed.data.json };
+}
+
+export async function searchFirecrawl(
+  options: FirecrawlSearchOptions,
+  config?: Partial<FirecrawlConfig>,
+): Promise<FirecrawlSearchResult> {
+  const apiKey = config?.apiKey ?? process.env.FIRECRAWL_API_KEY;
+  if (!apiKey) throw new Error("Missing FIRECRAWL_API_KEY. Create .env or export it before running.");
+  const baseUrl = config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2";
+  const maxResponseBytes = config?.maxResponseBytes ?? 2_000_000;
+  const query = options.query.trim();
+  const limit = options.limit ?? 5;
+  if (query.length < 1 || query.length > 500) throw new Error("Firecrawl search query is outside the allowed range");
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error("Firecrawl search limit is outside the allowed range");
+  const excludeDomains = options.excludeDomains?.map((domain) => domain.trim().toLowerCase()).filter(Boolean) ?? [];
+  if (excludeDomains.some((domain) => !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(domain))) {
+    throw new Error("Firecrawl search excludeDomains contains an invalid hostname");
+  }
+  throwIfAborted(options.signal);
+  const response = await fetch(`${baseUrl.replace(/\/+$/u, "")}/search`, {
+    method: "POST",
+    ...(options.signal ? { signal: options.signal } : {}),
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      limit,
+      ...(excludeDomains.length > 0 ? { excludeDomains } : {}),
+      ignoreInvalidURLs: true,
+      timeout: 30_000,
+    }),
+  });
+  const text = await readBoundedResponseText(response, maxResponseBytes, options.signal);
+  throwIfAborted(options.signal);
+  const body: unknown = text ? JSON.parse(text) : {};
+  if (!response.ok) {
+    const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
+    throw new Error(`Firecrawl ${response.status}: ${message}`);
+  }
+  const parsed = FirecrawlSearchResponseSchema.parse(body);
+  if (parsed.success === false) throw new Error(parsed.error ?? "Firecrawl search failed");
+  return { urls: (parsed.data?.web ?? []).map((result) => result.url) };
 }
 
 export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?: Partial<FirecrawlConfig>): Promise<FirecrawlAgentResult> {

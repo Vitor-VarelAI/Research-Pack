@@ -7,7 +7,7 @@ import { z } from "zod";
 import { createJobStore } from "../src/storage/job-store.js";
 import { loadCockpitModel } from "../src/cockpit/adapter.js";
 import { createDeepSeekClient, DeepSeekRequestError, type DeepSeekClient } from "../src/providers/deepseek.js";
-import { FIRECRAWL_AGENT_POLL_TIMEOUT_MS, FirecrawlAgentTimeoutError, runFirecrawlAgent } from "../src/providers/firecrawl.js";
+import { FIRECRAWL_AGENT_POLL_TIMEOUT_MS, FirecrawlAgentTimeoutError, runFirecrawlAgent, searchFirecrawl } from "../src/providers/firecrawl.js";
 import { EditorialJobInputSchema, assertEditorialJobTransition } from "../src/schemas/editorial-job.js";
 import { createDeepSeekGeneration, createEditorialRunner, createFirecrawlCollector, MAX_PRODUCTION_ANCHOR_TEXT_BYTES, MAX_PRODUCTION_DISCOVERY_SOURCES, MAX_PRODUCTION_SOURCE_TEXT_BYTES } from "../src/editorial/run-editorial-job.js";
 import { createPackageWriter } from "../src/editorial/package-writer.js";
@@ -356,9 +356,10 @@ describe("production Firecrawl collector", () => {
     };
   }
 
-  it("scrapes URL inputs directly, reserves Agent discovery for topics, and keeps anchors bounded and public", async () => {
+  it("searches from URL inputs, reserves Agent discovery for topics, and keeps anchors bounded and public", async () => {
     const scraped: string[] = [];
     const discoveryRequests: unknown[] = [];
+    const searchRequests: unknown[] = [];
     const provider: CrawlProvider = {
       map: async () => [],
       crawl: async () => { throw new Error("not used"); },
@@ -369,7 +370,7 @@ describe("production Firecrawl collector", () => {
           url,
           "x".repeat(MAX_PRODUCTION_ANCHOR_TEXT_BYTES + 1),
           url === "https://seed.example/article"
-            ? discovered
+            ? ["https://seed.example/privacy-policy", "https://seed.example/author/editor"]
             : [],
         );
       },
@@ -385,16 +386,38 @@ describe("production Firecrawl collector", () => {
       "https://user:pass@unsafe.example/secret",
       "http://127.0.0.1/private",
     ];
+    const searched = [
+      "https://anchor-one.example/a",
+      "https://anchor-one.example/duplicate",
+      "https://anchor-two.example/b",
+      "https://noise.example/privacy-policy",
+      "https://anchor-three.example/c",
+      "https://anchor-four.example/d",
+      "https://user:pass@unsafe.example/secret",
+      "http://127.0.0.1/private",
+    ];
     const discover = async (options: { signal?: AbortSignal }) => {
       discoveryRequests.push(options);
       return { data: { answer: "bounded", facts: [], sources: discovered, confidence: "high" }, provenance: { requestedAt: "2026-03-01T00:00:00.000Z" } };
     };
-    const collector = createFirecrawlCollector(provider, discover);
+    const search = async (options: unknown) => {
+      searchRequests.push(options);
+      return { urls: searched };
+    };
+    const collector = createFirecrawlCollector(provider, discover, search);
     const urlResult = await collector.collect({ kind: "url", url: "https://seed.example/article/", context: "ctx", output: "blog-formats", exportHtml: false }, new AbortController().signal);
     assert.equal(discoveryRequests.length, 0);
+    assert.equal(searchRequests.length, 1);
+    const searchRequest = searchRequests[0] as { query: string; limit: number; excludeDomains: string[]; signal: AbortSignal };
+    assert.equal(searchRequest.query, "Title https://seed.example/article");
+    assert.equal(searchRequest.limit, 5);
+    assert.deepEqual(searchRequest.excludeDomains, ["seed.example"]);
+    assert.ok(searchRequest.signal instanceof AbortSignal);
     assert.ok(scraped.length <= MAX_PRODUCTION_DISCOVERY_SOURCES);
     assert.equal(scraped[0], "https://seed.example/article");
     assert.equal(new Set(scraped).size, scraped.length);
+    assert.equal(scraped.filter((url) => url.startsWith("https://anchor-one.example/")).length, 1);
+    assert.ok(scraped.every((url) => !/privacy-policy|\/author\//u.test(url)));
     assert.ok(scraped.every((url) => !url.includes("user:pass") && !url.includes("127.0.0.1")));
     assert.ok(urlResult.anchors.every((anchor) => scraped.includes(anchor.sourceUrl)));
     assert.ok(Buffer.byteLength(urlResult.sourceText ?? "", "utf8") <= MAX_PRODUCTION_SOURCE_TEXT_BYTES);
@@ -403,6 +426,7 @@ describe("production Firecrawl collector", () => {
     scraped.length = 0;
     const topicResult = await collector.collect({ kind: "topic", topic: "bounded topic", context: "ctx", output: "blog-formats", exportHtml: false }, new AbortController().signal);
     assert.equal(discoveryRequests.length, 1);
+    assert.equal(searchRequests.length, 1);
     assert.ok(scraped.length >= 3 && scraped.length <= MAX_PRODUCTION_DISCOVERY_SOURCES);
     assert.equal(topicResult.anchors.length, scraped.length);
   });
@@ -420,6 +444,41 @@ describe("production Firecrawl collector", () => {
     const pending = collector.collect({ kind: "topic", topic: "cancel me", context: "", output: "blog-formats", exportHtml: false }, controller.signal);
     controller.abort();
     await assert.rejects(pending, /aborted|cancelled/iu);
+  });
+
+  it("uses the bounded Firecrawl Search contract without requesting implicit result scrapes", async () => {
+    const originalFetch = globalThis.fetch;
+    let requestBody: Record<string, unknown> | undefined;
+    globalThis.fetch = (async (_url, init) => {
+      requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return Response.json({
+        success: true,
+        data: {
+          web: [
+            { url: "https://one.example/story", title: "One" },
+            { url: "https://two.example/story", title: "Two" },
+          ],
+        },
+      });
+    }) as typeof fetch;
+    try {
+      const result = await searchFirecrawl({
+        query: "related story",
+        limit: 5,
+        excludeDomains: ["seed.example"],
+      }, { apiKey: "test-key", baseUrl: "https://api.firecrawl.dev/v2" });
+      assert.deepEqual(result.urls, ["https://one.example/story", "https://two.example/story"]);
+      assert.deepEqual(requestBody, {
+        query: "related story",
+        limit: 5,
+        excludeDomains: ["seed.example"],
+        ignoreInvalidURLs: true,
+        timeout: 30_000,
+      });
+      assert.equal("scrapeOptions" in (requestBody ?? {}), false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("times out a hanging Firecrawl Agent POST", { timeout: 1_000 }, async () => {
