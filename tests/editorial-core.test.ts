@@ -372,6 +372,44 @@ describe("production Firecrawl collector", () => {
     await assert.rejects(pending, /aborted|cancelled/iu);
   });
 
+  it("times out a hanging Firecrawl Agent POST", { timeout: 1_000 }, async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    })) as typeof fetch;
+    try {
+      await assert.rejects(
+        runFirecrawlAgent({ prompt: "fixed", pollTimeoutMs: 25 }, { apiKey: "local-test", baseUrl: "https://local.invalid/v2" }),
+        (error: unknown) => error instanceof FirecrawlAgentTimeoutError
+          && error.code === "provider_timeout"
+          && error.jobId === undefined,
+      );
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it("times out a hanging Firecrawl Agent poll or body read", { timeout: 2_000 }, async () => {
+    const originalFetch = globalThis.fetch;
+    try {
+      for (const mode of ["poll", "body"] as const) {
+        globalThis.fetch = (async (url, init) => {
+          if (mode === "body") {
+            return new Response(new ReadableStream<Uint8Array>({ start() {} }), { status: 200 });
+          }
+          if (String(url).endsWith("/agent")) return Response.json({ success: true, id: "agent-job" });
+          return await new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+          });
+        }) as typeof fetch;
+        await assert.rejects(
+          runFirecrawlAgent({ prompt: "fixed", pollIntervalMs: 1, pollTimeoutMs: 50 }, { apiKey: "local-test", baseUrl: "https://local.invalid/v2" }),
+          (error: unknown) => error instanceof FirecrawlAgentTimeoutError
+            && error.code === "provider_timeout"
+            && error.jobId === (mode === "poll" ? "agent-job" : undefined),
+        );
+      }
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
   it("aborts an active Firecrawl Agent poll sleep and never issues the poll", async () => {
     const originalFetch = globalThis.fetch;
     let pollRequests = 0;
@@ -390,7 +428,7 @@ describe("production Firecrawl collector", () => {
     } finally { globalThis.fetch = originalFetch; }
   });
 
-  it("allows five minutes by default and classifies an exhausted Agent deadline as provider_timeout", async () => {
+  it("allows five minutes by default and never starts a poll after the Agent deadline", async () => {
     assert.equal(FIRECRAWL_AGENT_POLL_TIMEOUT_MS, 300_000);
     const originalFetch = globalThis.fetch;
     let pollRequests = 0;
@@ -401,12 +439,13 @@ describe("production Firecrawl collector", () => {
     }) as typeof fetch;
     try {
       await assert.rejects(
-        runFirecrawlAgent({ prompt: "fixed", schema: {}, pollIntervalMs: 1, pollTimeoutMs: 25 }, { apiKey: "local-test", baseUrl: "https://local.invalid/v2" }),
+        runFirecrawlAgent({ prompt: "fixed", schema: {}, pollIntervalMs: 1_000, pollTimeoutMs: 25 }, { apiKey: "local-test", baseUrl: "https://local.invalid/v2" }),
         (error: unknown) => error instanceof FirecrawlAgentTimeoutError
           && error.code === "provider_timeout"
-          && error.jobId === "agent-job",
+          && error.jobId === "agent-job"
+          && error.message.includes("agent-job"),
       );
-      assert.ok(pollRequests > 0);
+      assert.equal(pollRequests, 0);
     } finally { globalThis.fetch = originalFetch; }
   });
 

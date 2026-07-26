@@ -91,8 +91,9 @@ export const FIRECRAWL_AGENT_POLL_TIMEOUT_MS = 300_000;
 export class FirecrawlAgentTimeoutError extends Error {
   readonly code = "provider_timeout";
 
-  constructor(readonly jobId: string) {
-    super(`Firecrawl agent timed out waiting for job ${jobId}`);
+  constructor(readonly jobId?: string) {
+    const safeJobId = jobId && /^[a-zA-Z0-9_-]{1,128}$/u.test(jobId) ? jobId : undefined;
+    super(safeJobId ? `Firecrawl agent timed out waiting for job ${safeJobId}` : "Firecrawl agent timed out");
     this.name = "FirecrawlAgentTimeoutError";
   }
 }
@@ -452,65 +453,90 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
   };
 
   const requestedAt = nowIso();
-  throwIfAborted(options.signal);
-  const response = await fetch(`${resolved.baseUrl}/agent`, {
-    method: "POST",
-    ...(options.signal ? { signal: options.signal } : {}),
-    headers: {
-      "Authorization": `Bearer ${resolved.apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      prompt: options.prompt,
-      ...(options.urls ? { urls: options.urls } : {}),
-      ...(options.schema ? { schema: options.schema } : {}),
-      ...(options.model ? { model: options.model } : {}),
-    }),
-  });
-
-  const text = await readBoundedResponseText(response, resolved.maxResponseBytes);
-  throwIfAborted(options.signal);
-  const body: unknown = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
-    throw new Error(`Firecrawl ${response.status}: ${message}`);
-  }
-
-  const parsed = FirecrawlAgentResponseSchema.parse(body);
-  if (parsed.success === false) throw new Error(parsed.error ?? "Firecrawl agent failed");
-  if (parsed.data !== undefined) {
-    return { data: parsed.data, provenance: { requestedAt } };
-  }
-  if (!parsed.id) throw new Error(parsed.error ?? "Firecrawl agent did not return data or a job id");
-
-  const deadline = Date.now() + (options.pollTimeoutMs ?? resolved.pollTimeoutMs);
-  const pollIntervalMs = options.pollIntervalMs ?? resolved.pollIntervalMs;
-  while (Date.now() < deadline) {
-    await abortableDelay(pollIntervalMs, options.signal);
-    const statusResponse = await fetch(`${resolved.baseUrl}/agent/${parsed.id}`, {
-      method: "GET",
-      ...(options.signal ? { signal: options.signal } : {}),
-      headers: { "Authorization": `Bearer ${resolved.apiKey}` },
-    });
+  const controller = new AbortController();
+  let jobId: string | undefined;
+  let timedOut = false;
+  const onAbort = (): void => controller.abort();
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, options.pollTimeoutMs ?? resolved.pollTimeoutMs);
+  const throwIfStopped = (): void => {
+    if (timedOut) throw new FirecrawlAgentTimeoutError(jobId);
     throwIfAborted(options.signal);
-    const statusText = await readBoundedResponseText(statusResponse, resolved.maxResponseBytes);
-    const statusBody: unknown = statusText ? JSON.parse(statusText) : {};
-    if (!statusResponse.ok) {
-      const message = typeof statusBody === "object" && statusBody !== null && "error" in statusBody ? String(statusBody.error) : statusText;
-      throw new Error(`Firecrawl ${statusResponse.status}: ${message}`);
+  };
+  const fetchWithDeadline = async (url: string, init: RequestInit): Promise<Response> => {
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      throwIfStopped();
+      throw error;
     }
-    const status = FirecrawlAgentResponseSchema.parse(statusBody);
-    if (status.success === false) throw new Error(status.error ?? "Firecrawl agent failed");
-    if (status.data !== undefined) {
-      return { data: status.data, provenance: { requestedAt } };
-    }
-    if (status.status === "failed" || status.status === "cancelled") throw new Error(`Firecrawl agent ${status.status}`);
-  }
+  };
 
-  throw new FirecrawlAgentTimeoutError(parsed.id);
+  try {
+    throwIfStopped();
+    const response = await fetchWithDeadline(`${resolved.baseUrl}/agent`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${resolved.apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        prompt: options.prompt,
+        ...(options.urls ? { urls: options.urls } : {}),
+        ...(options.schema ? { schema: options.schema } : {}),
+        ...(options.model ? { model: options.model } : {}),
+      }),
+    });
+
+    const text = await readBoundedResponseText(response, resolved.maxResponseBytes, controller.signal);
+    throwIfStopped();
+    const body: unknown = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
+      throw new Error(`Firecrawl ${response.status}: ${message}`);
+    }
+
+    const parsed = FirecrawlAgentResponseSchema.parse(body);
+    if (parsed.success === false) throw new Error(parsed.error ?? "Firecrawl agent failed");
+    if (parsed.data !== undefined) return { data: parsed.data, provenance: { requestedAt } };
+    if (!parsed.id) throw new Error(parsed.error ?? "Firecrawl agent did not return data or a job id");
+    jobId = parsed.id;
+
+    const pollIntervalMs = options.pollIntervalMs ?? resolved.pollIntervalMs;
+    while (true) {
+      try {
+        await abortableDelay(pollIntervalMs, controller.signal);
+      } catch (error) {
+        throwIfStopped();
+        throw error;
+      }
+      throwIfStopped();
+      const statusResponse = await fetchWithDeadline(`${resolved.baseUrl}/agent/${parsed.id}`, {
+        method: "GET",
+        headers: { "Authorization": `Bearer ${resolved.apiKey}` },
+      });
+      const statusText = await readBoundedResponseText(statusResponse, resolved.maxResponseBytes, controller.signal);
+      throwIfStopped();
+      const statusBody: unknown = statusText ? JSON.parse(statusText) : {};
+      if (!statusResponse.ok) {
+        const message = typeof statusBody === "object" && statusBody !== null && "error" in statusBody ? String(statusBody.error) : statusText;
+        throw new Error(`Firecrawl ${statusResponse.status}: ${message}`);
+      }
+      const status = FirecrawlAgentResponseSchema.parse(statusBody);
+      if (status.success === false) throw new Error(status.error ?? "Firecrawl agent failed");
+      if (status.data !== undefined) return { data: status.data, provenance: { requestedAt } };
+      if (status.status === "failed" || status.status === "cancelled") throw new Error(`Firecrawl agent ${status.status}`);
+    }
+  } finally {
+    clearTimeout(timer);
+    options.signal?.removeEventListener("abort", onAbort);
+  }
 }
 
-async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+async function readBoundedResponseText(response: Response, maxBytes: number, signal?: AbortSignal): Promise<string> {
   const contentLength = response.headers.get("content-length");
   if (contentLength && Number(contentLength) > maxBytes) throw new Error(`Firecrawl response exceeded the size limit (${maxBytes})`);
   if (!response.body) return "";
@@ -518,6 +544,11 @@ async function readBoundedResponseText(response: Response, maxBytes: number): Pr
   const decoder = new TextDecoder();
   const chunks: string[] = [];
   let total = 0;
+  const onAbort = (): void => {
+    void reader.cancel().catch(() => undefined);
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  if (signal?.aborted) onAbort();
   try {
     while (true) {
       const result = await reader.read();
@@ -532,6 +563,7 @@ async function readBoundedResponseText(response: Response, maxBytes: number): Pr
     chunks.push(decoder.decode());
     return chunks.join("");
   } finally {
+    signal?.removeEventListener("abort", onAbort);
     reader.releaseLock();
   }
 }
