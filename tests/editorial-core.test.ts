@@ -441,6 +441,7 @@ describe("production Firecrawl collector", () => {
         return document(url, "source text", url === "https://seed.example/article" ? [
           "https://seed.example/privacy-policy",
           "https://seed.example/author/editor",
+          "https://cookiedatabase.org/tcf/purposes",
           "https://official.example/open-letter",
           "https://technical.example/analysis",
           "https://policy.example/report",
@@ -645,6 +646,7 @@ describe("production DeepSeek QA", () => {
     try {
       const result = await runWithChecks(root, qaCheck(true, "PASS"), qaCheck(true, "PASS"));
       assert.equal(result.state, "awaiting_final_approval");
+      assert.match(result.calls[0] ?? "", /one anchor object for every canonical source/iu);
       assert.equal(result.calls.filter((call) => call.includes("fixed structured editorial QA")).length, 1);
       assert.equal(result.calls.filter((call) => call.includes("fixed structured formats QA")).length, 1);
       const store = createJobStore({ rootDir: path.join(root, "jobs") });

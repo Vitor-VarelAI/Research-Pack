@@ -612,7 +612,7 @@ export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGener
   return {
     async research({ job, collection, signal }) {
       const topic = job.kind === "topic" ? job.topic : job.url;
-      const result = EditorialResearchSummarySchema.parse(await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: research. Return only the research summary JSON. Classify and extract claims only for the supplied canonical scraped source URLs; the application derives the source gate.` }, { role: "user", content: buildResearchPrompt(job, collection.sourceText ?? "") }], schema: EditorialResearchSummarySchema, signal }));
+      const result = EditorialResearchSummarySchema.parse(await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: research. Return only the research summary JSON. Return one anchor object for every canonical source labelled in the collected source text and copy its exact URL. Include only claims materially relevant to the supplied topic; irrelevant sources must have empty claim arrays. The application derives the source gate.` }, { role: "user", content: buildResearchPrompt(job, collection.sourceText ?? "") }], schema: EditorialResearchSummarySchema, signal }));
       const byUrl = new Map(result.anchors.map((anchor) => [canonicalEditorialUrl(anchor.sourceUrl), anchor]));
       const enriched = collection.anchors.map((anchor) => {
         const classified = byUrl.get(canonicalEditorialUrl(anchor.sourceUrl));
@@ -736,6 +736,7 @@ function canonicalDiscoveryUrls(input: EditorialJobInput, discovered: readonly s
 }
 
 function isLikelyNavigationOrPolicyUrl(url: URL): boolean {
+  if (/(?:^|\.)cookiedatabase\.org$/iu.test(url.hostname)) return true;
   return /(?:^|\/)(?:author|authors|category|categories|cookie-policy(?:-[a-z]{2})?|privacy-policy|tag|tags)(?:\/|$)/iu.test(url.pathname);
 }
 
