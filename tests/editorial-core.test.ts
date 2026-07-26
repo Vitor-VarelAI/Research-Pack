@@ -431,6 +431,42 @@ describe("production Firecrawl collector", () => {
     assert.equal(topicResult.anchors.length, scraped.length);
   });
 
+  it("falls back to useful external links from the seed page when Search returns no URLs", async () => {
+    const scraped: string[] = [];
+    const provider: CrawlProvider = {
+      map: async () => [],
+      crawl: async () => { throw new Error("not used"); },
+      scrape: async (url) => {
+        scraped.push(url);
+        return document(url, "source text", url === "https://seed.example/article" ? [
+          "https://seed.example/privacy-policy",
+          "https://seed.example/author/editor",
+          "https://official.example/open-letter",
+          "https://technical.example/analysis",
+          "https://policy.example/report",
+        ] : []);
+      },
+    };
+    const collector = createFirecrawlCollector(
+      provider,
+      async () => { throw new Error("Agent must not run for URL inputs"); },
+      async () => ({ urls: [] }),
+    );
+
+    const result = await collector.collect(
+      { kind: "url", url: "https://seed.example/article", context: "", output: "blog-formats", exportHtml: false },
+      new AbortController().signal,
+    );
+
+    assert.deepEqual(scraped, [
+      "https://seed.example/article",
+      "https://official.example/open-letter",
+      "https://technical.example/analysis",
+      "https://policy.example/report",
+    ]);
+    assert.equal(result.anchors.length, 4);
+  });
+
   it("aborts discovery without scraping or returning a late collection", async () => {
     const controller = new AbortController();
     const provider: CrawlProvider = {

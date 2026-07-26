@@ -550,7 +550,7 @@ export function createFirecrawlCollector(
           signal,
         });
         throwIfAborted(signal);
-        discoveredSources = result.urls;
+        discoveredSources = [...result.urls, ...document.links];
       } else {
         const result = await discover({
           prompt: `${PRODUCTION_DISCOVERY_PROMPT}\n${delimit("topic", input.topic)}\n${delimit("context", input.context)}`,
