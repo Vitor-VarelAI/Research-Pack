@@ -180,6 +180,25 @@ describe("direct DeepSeek client", () => {
     assert.deepEqual(result, { ok: true });
   });
 
+  it("sends the requested output schema to DeepSeek instead of relying on JSON mode alone", async () => {
+    let body: { messages: Array<{ role: string; content: string }> } | undefined;
+    const client = createDeepSeekClient({ apiKey: "secret-key", baseUrl: "http://127.0.0.1:9999/v1", model: "deepseek-v4-pro" }, {
+      fetchImpl: async (_url, init) => {
+        body = JSON.parse(String(init?.body)) as typeof body;
+        return Response.json({ choices: [{ message: { content: JSON.stringify({ ok: true }) } }] });
+      },
+    });
+
+    await client.completeJson({
+      messages: [{ role: "system", content: "Return the requested object." }, { role: "user", content: "Generate it." }],
+      schema: z.object({ ok: z.boolean() }).strict(),
+    });
+
+    const instruction = body?.messages.at(-1)?.content ?? "";
+    assert.match(instruction, /required output JSON schema/iu);
+    assert.match(instruction, /"ok":\{"type":"boolean"\}/u);
+  });
+
   it("maps an aborted local request to a safe cancellation", async () => {
     const client = createDeepSeekClient({ apiKey: "secret", baseUrl: "http://127.0.0.1:9999/v1", model: "deepseek-v4-pro" }, { fetchImpl: async (_url, init) => await new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")))) });
     const controller = new AbortController();

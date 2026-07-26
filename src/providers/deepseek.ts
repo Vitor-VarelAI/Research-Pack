@@ -77,9 +77,12 @@ export function createDeepSeekClient(config: DeepSeekConfig, options: DeepSeekCl
     request.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       const endpoint = new URL("chat/completions", `${resolved.baseUrl.replace(/\/+$/u, "")}/`).toString();
+      const messages = request.messages.map((message) => ({ role: message.role, content: message.content }));
+      const lastMessage = messages.at(-1)!;
+      lastMessage.content = `${lastMessage.content}\n\nRequired output JSON Schema. Return exactly one JSON object matching this schema, with no additional fields or prose:\n${JSON.stringify(z.toJSONSchema(request.schema))}`;
       const body = {
         model: resolved.model,
-        messages: request.messages.map((message) => ({ role: message.role, content: message.content })),
+        messages,
         response_format: { type: "json_object" },
         ...(request.temperature === undefined ? {} : { temperature: request.temperature }),
       };
