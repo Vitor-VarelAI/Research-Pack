@@ -31,7 +31,7 @@ export function buildEditorialQaPrompt(research: EditorialResearchPack, draft: E
 }
 
 export function buildFormatsQaPrompt(draft: EditorialDraft, formats: EditorialFormats): string {
-  return `${EDITORIAL_SYSTEM_PROMPT}\n\nStage: fixed formats QA. Check every derivative and slide for source, format and rhythm risks, and return the strict QA JSON. Set model_verdict to PASS only when this check passes; use HOLD or REVIEW otherwise.\n${delimit("draft", JSON.stringify(draft))}\n${delimit("formats", JSON.stringify(formats))}`;
+  return `${EDITORIAL_SYSTEM_PROMPT}\n\nStage: fixed formats QA. Check every derivative and slide for actual source consistency, contract violations and material rhythm risks, then return the strict QA JSON. Inspect sourceUrls inside draft.claims; do not require sourceUrls on format strings or slide objects because those fields do not exist. Exactly ten publication slides are required and must not be flagged as excessive. Do not fail merely because the accepted source gate contains three anchors, do not require every claim to appear in multiple sources, and do not turn generic engagement preferences into violations. Flag a source risk only when a format introduces a factual claim absent from the cited draft claims, contradicts them, or removes necessary uncertainty. Set model_verdict to PASS only when this check passes; use HOLD or REVIEW otherwise.\n${delimit("draft", JSON.stringify(draft))}\n${delimit("formats", JSON.stringify(formats))}`;
 }
 
 export const MAX_UNTRUSTED_PROMPT_BYTES = 180_000;

@@ -203,9 +203,9 @@ const transitions: Record<EditorialJobState, readonly EditorialJobState[]> = {
   qa: ["awaiting_final_approval", "failed", "cancelled", "interrupted"],
   awaiting_final_approval: ["completed", "failed", "cancelled", "interrupted"],
   completed: [],
-  failed: ["researching", "source_gate", "diagnosing", "drafting", "formatting", "cancelled"],
+  failed: ["researching", "source_gate", "diagnosing", "drafting", "formatting", "qa", "cancelled"],
   cancelled: [],
-  interrupted: ["researching", "source_gate", "diagnosing", "drafting", "formatting", "cancelled"],
+  interrupted: ["researching", "source_gate", "diagnosing", "drafting", "formatting", "qa", "cancelled"],
 };
 
 export function canEditorialJobTransition(from: EditorialJobState, to: EditorialJobState): boolean {

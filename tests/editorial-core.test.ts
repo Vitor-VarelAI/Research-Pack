@@ -320,6 +320,43 @@ describe("mocked runner", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("retries QA against persisted outputs without regenerating the draft or formats", async () => {
+    const root = await tempName("editorial-qa-retry-");
+    try {
+      const generated = generation();
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      let draftCalls = 0;
+      let formatCalls = 0;
+      let qaCalls = 0;
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => ({ anchors: generated.research.anchors }) },
+        generation: {
+          research: async () => generated.research,
+          angles: async () => generated.angles,
+          diagnosis: async () => generated.diagnosis,
+          draft: async () => { draftCalls += 1; return generated.draft; },
+          formats: async () => { formatCalls += 1; return generated.formats; },
+          qa: async () => {
+            qaCalls += 1;
+            return qaCalls === 1
+              ? { ...generatedQa(generated), passed: false, formatsLint: qaCheck(false, "REVIEW") }
+              : generatedQa(generated);
+          },
+        },
+        packageWriter: createPackageWriter(root),
+      });
+
+      const failed = await runner.selectAngle((await runner.start(input)).id, "angle-1");
+      assert.equal(failed.state, "failed");
+      assert.equal(failed.failedStage, "qa");
+      assert.equal((await runner.retry(failed.id)).state, "awaiting_final_approval");
+      assert.equal(draftCalls, 1);
+      assert.equal(formatCalls, 1);
+      assert.equal(qaCalls, 2);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("cancels a delayed stage and ignores its late completion", async () => {
     const root = await tempName("editorial-cancel-");
     try {
@@ -684,6 +721,10 @@ describe("production DeepSeek QA", () => {
       const result = await runWithChecks(root, qaCheck(true, "PASS"), qaCheck(true, "PASS"));
       assert.equal(result.state, "awaiting_final_approval");
       assert.match(result.calls[0] ?? "", /one anchor object for every canonical source/iu);
+      const formatsQaCall = result.calls.find((call) => call.includes("fixed structured formats QA")) ?? "";
+      assert.match(formatsQaCall, /exactly ten publication slides are required/iu);
+      assert.match(formatsQaCall, /do not require sourceUrls on format strings or slide objects/iu);
+      assert.match(formatsQaCall, /do not fail merely because the accepted source gate contains three anchors/iu);
       assert.equal(result.calls.filter((call) => call.includes("fixed structured editorial QA")).length, 1);
       assert.equal(result.calls.filter((call) => call.includes("fixed structured formats QA")).length, 1);
       const store = createJobStore({ rootDir: path.join(root, "jobs") });

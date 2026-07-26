@@ -256,6 +256,7 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
       }, { revision: job.revision, state: job.state });
       if (target === "researching") return await executeResearch(current, execution);
       if (target === "source_gate") return await executeAngles(current, execution);
+      if (target === "qa") return await executeQa(current, execution);
       const angles = await readArtifact(jobId, "angles.json", EditorialAngleCandidatesSchema.parse);
       const selected = current.selectedAngle;
       if (target === "diagnosing") {
@@ -339,14 +340,21 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
       current = await completeStage(job.id, "formatting", formatsRef);
       current = await options.store.transition(job.id, "qa", { stageSummaries: stageRunning(current.stageSummaries, "qa") }, { revision: current.revision, state: "formatting" });
     }
+    return executeQa(current, execution);
+  }
+
+  async function executeQa(job: EditorialJob, execution: Execution): Promise<EditorialJob> {
+    assertExecution(job, execution, "qa");
+    const researchPack = await readArtifact(job.id, "research-pack.json", EditorialResearchPackSchema.parse);
+    const diagnosis = await readArtifact(job.id, "diagnosis.json", EditorialDiagnosisSchema.parse);
+    const draft = await readArtifact(job.id, "draft.json", EditorialDraftSchema.parse);
     const formats = await readArtifact(job.id, "formats.json", EditorialFormatsSchema.parse);
-    assertExecution(current, execution, "qa");
     validateEditorialEvidence(researchPack, draft, diagnosis);
     const qa = EditorialQaSchema.parse(options.generation.qa
       ? await options.generation.qa({ job: job.input, researchPack, draft, formats, signal: execution.controller.signal })
       : evaluateEditorialQa(researchPack, draft, formats));
     const qaRef = await writeJsonArtifact(job.id, "qa.json", qa, execution, "qa");
-    current = await completeStage(job.id, "qa", qaRef);
+    const current = await completeStage(job.id, "qa", qaRef);
     if (!isQaApproved(qa)) return options.store.transition(current.id, "failed", { error: { code: "generation_invalid", stage: "qa", message: "Editorial QA blocked final approval" }, failedStage: "qa" }, { revision: current.revision, state: "qa" });
     return options.store.transition(current.id, "awaiting_final_approval", {}, { revision: current.revision, state: "qa" });
   }
@@ -851,11 +859,11 @@ function stageForState(state: EditorialJob["state"]): EditorialJobStage | null {
   return ["researching", "source_gate", "diagnosing", "drafting", "formatting", "qa"].includes(state) ? state as EditorialJobStage : null;
 }
 
-function retryStage(job: EditorialJob): "researching" | "source_gate" | "diagnosing" | "drafting" | "formatting" {
+function retryStage(job: EditorialJob): "researching" | "source_gate" | "diagnosing" | "drafting" | "formatting" | "qa" {
   if (job.error?.code === "human_rejected") return "drafting";
   if (job.failedStage === "source_gate" && job.error?.code !== "source_gate_blocked" && job.stageSummaries.source_gate.status === "completed") return "source_gate";
   if (job.failedStage === "researching" || job.failedStage === "source_gate" || job.failedStage === null) return "researching";
-  if (job.failedStage === "qa") return "drafting";
+  if (job.failedStage === "qa") return "qa";
   return job.failedStage;
 }
 
