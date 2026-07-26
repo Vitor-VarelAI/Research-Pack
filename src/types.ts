@@ -45,6 +45,8 @@ export type ScrapedDocument = z.infer<typeof ScrapedDocumentSchema>;
 export type ScrapeOptions = {
   /** maxAge (ms) to send in the Firecrawl scrape payload. `0` forces fresh. */
   maxAgeMs?: number;
+  /** Abort the active provider request when the owning job is cancelled. */
+  signal?: AbortSignal;
 };
 
 export const CrawlOptionsSchema = z.object({

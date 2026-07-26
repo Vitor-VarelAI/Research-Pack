@@ -15,6 +15,8 @@ import { makeId, nowIso } from "./util.js";
 import { getHnAiContext, getHnTopStories } from "./hn.js";
 import { buildRadarReportFromHn } from "./radar.js";
 import { exportEditorialHtml } from "./export-html.js";
+import { createProductionEditorialRunner } from "./editorial/run-editorial-job.js";
+import { EditorialJobInputSchema } from "./schemas/editorial-job.js";
 
 /**
  * Upper bounds for CLI integer options. Excessive values are rejected at
@@ -284,6 +286,51 @@ program
     }
     print(result);
   });
+
+const editorial = program
+  .command("editorial")
+  .description("Run the fixed editorial control-plane workflow without a generic command surface");
+
+editorial
+  .command("start")
+  .description("Start one editorial job and stop at the next human gate")
+  .option("--url <url>", "source URL")
+  .option("--topic <topic>", "editorial topic")
+  .option("--context <text>", "bounded editorial context")
+  .option("--export-html", "export HTML after final approval")
+  .action(async (options: { url?: string; topic?: string; context?: string; exportHtml?: boolean }) => {
+    if ((options.url ? 1 : 0) + (options.topic ? 1 : 0) !== 1) throw new Error("editorial start requires exactly one of --url or --topic");
+    const input = EditorialJobInputSchema.parse(options.url
+      ? { kind: "url", url: options.url, context: options.context ?? "", output: "blog-formats", exportHtml: options.exportHtml ?? false }
+      : { kind: "topic", topic: options.topic, context: options.context ?? "", output: "blog-formats", exportHtml: options.exportHtml ?? false });
+    const job = await createProductionEditorialRunner().start(input);
+    print({ id: job.id, state: job.state });
+  });
+
+editorial
+  .command("select-angle")
+  .description("Select one of the three persisted angle candidates")
+  .requiredOption("--job <id>", "editorial job id")
+  .requiredOption("--angle <id>", "angle id")
+  .action(async (options: { job: string; angle: string }) => {
+    const job = await createProductionEditorialRunner().selectAngle(options.job, options.angle);
+    print({ id: job.id, state: job.state });
+  });
+
+for (const action of ["approve", "reject", "cancel", "retry"] as const) {
+  editorial
+    .command(action)
+    .description(`Perform the fixed editorial ${action} action`)
+    .requiredOption("--job <id>", "editorial job id")
+    .action(async (options: { job: string }) => {
+      const runner = createProductionEditorialRunner();
+      const job = action === "approve" ? await runner.approve(options.job)
+        : action === "reject" ? await runner.reject(options.job)
+        : action === "cancel" ? await runner.cancel(options.job)
+        : await runner.retry(options.job);
+      print({ id: job.id, state: job.state });
+    });
+}
 
 program.parseAsync(process.argv).catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);

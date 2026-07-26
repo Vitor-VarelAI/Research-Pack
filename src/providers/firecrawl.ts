@@ -83,6 +83,7 @@ type FirecrawlConfig = {
   baseUrl: string;
   pollIntervalMs: number;
   pollTimeoutMs: number;
+  maxResponseBytes: number;
 };
 
 export type FirecrawlAgentOptions = {
@@ -92,6 +93,7 @@ export type FirecrawlAgentOptions = {
   model?: "spark-1-mini" | "spark-1-pro";
   pollIntervalMs?: number;
   pollTimeoutMs?: number;
+  signal?: AbortSignal;
 };
 
 export type FirecrawlAgentResult = {
@@ -105,6 +107,7 @@ export type FirecrawlStructuredScrapeOptions = {
   schema: unknown;
   /** maxAge (ms). `0` forces fresh (research/fact-check default). */
   maxAgeMs?: number;
+  signal?: AbortSignal;
 };
 
 export type FirecrawlStructuredScrapeResult = {
@@ -186,6 +189,7 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
     baseUrl: config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2",
     pollIntervalMs: config?.pollIntervalMs ?? 2_000,
     pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
+    maxResponseBytes: config?.maxResponseBytes ?? 2_000_000,
   };
 
   /**
@@ -206,7 +210,7 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
       },
     });
 
-    const text = await response.text();
+    const text = await readBoundedResponseText(response, resolved.maxResponseBytes);
     const body: unknown = text ? JSON.parse(text) : {};
     if (!response.ok) {
       const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
@@ -277,6 +281,7 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
       const maxAgeMs = options?.maxAgeMs;
       const body = await request("/scrape", {
         method: "POST",
+        ...(options?.signal ? { signal: options.signal } : {}),
         body: JSON.stringify({
           url,
           formats: ["markdown", "html", "links"],
@@ -289,9 +294,10 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
       return toDocument(url, parsed.data, provenance);
     },
 
-    async map(url: string): Promise<string[]> {
+    async map(url: string, signal?: AbortSignal): Promise<string[]> {
       const body = await request("/map", {
         method: "POST",
+        ...(signal ? { signal } : {}),
         body: JSON.stringify({ url }),
       });
       const parsed = FirecrawlMapResponseSchema.parse(body);
@@ -380,10 +386,13 @@ export async function scrapeFirecrawlStructured(
   }
 
   const baseUrl = config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2";
+  const maxResponseBytes = config?.maxResponseBytes ?? 2_000_000;
   const requestedAt = nowIso();
   const maxAgeMs = options.maxAgeMs;
+  throwIfAborted(options.signal);
   const response = await fetch(`${baseUrl}/scrape`, {
     method: "POST",
+    ...(options.signal ? { signal: options.signal } : {}),
     headers: {
       "Authorization": `Bearer ${apiKey}`,
       "Content-Type": "application/json",
@@ -400,7 +409,8 @@ export async function scrapeFirecrawlStructured(
     }),
   });
 
-  const text = await response.text();
+  const text = await readBoundedResponseText(response, maxResponseBytes);
+  throwIfAborted(options.signal);
   const body: unknown = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
@@ -427,11 +437,14 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
     baseUrl: config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2",
     pollIntervalMs: config?.pollIntervalMs ?? 2_000,
     pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
+    maxResponseBytes: config?.maxResponseBytes ?? 2_000_000,
   };
 
   const requestedAt = nowIso();
+  throwIfAborted(options.signal);
   const response = await fetch(`${resolved.baseUrl}/agent`, {
     method: "POST",
+    ...(options.signal ? { signal: options.signal } : {}),
     headers: {
       "Authorization": `Bearer ${resolved.apiKey}`,
       "Content-Type": "application/json",
@@ -444,7 +457,8 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
     }),
   });
 
-  const text = await response.text();
+  const text = await readBoundedResponseText(response, resolved.maxResponseBytes);
+  throwIfAborted(options.signal);
   const body: unknown = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
@@ -461,12 +475,14 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
   const deadline = Date.now() + (options.pollTimeoutMs ?? resolved.pollTimeoutMs);
   const pollIntervalMs = options.pollIntervalMs ?? resolved.pollIntervalMs;
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    await abortableDelay(pollIntervalMs, options.signal);
     const statusResponse = await fetch(`${resolved.baseUrl}/agent/${parsed.id}`, {
       method: "GET",
+      ...(options.signal ? { signal: options.signal } : {}),
       headers: { "Authorization": `Bearer ${resolved.apiKey}` },
     });
-    const statusText = await statusResponse.text();
+    throwIfAborted(options.signal);
+    const statusText = await readBoundedResponseText(statusResponse, resolved.maxResponseBytes);
     const statusBody: unknown = statusText ? JSON.parse(statusText) : {};
     if (!statusResponse.ok) {
       const message = typeof statusBody === "object" && statusBody !== null && "error" in statusBody ? String(statusBody.error) : statusText;
@@ -481,4 +497,50 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
   }
 
   throw new Error(`Firecrawl agent timed out waiting for job ${parsed.id}`);
+}
+
+async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+  const contentLength = response.headers.get("content-length");
+  if (contentLength && Number(contentLength) > maxBytes) throw new Error(`Firecrawl response exceeded the size limit (${maxBytes})`);
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel();
+        throw new Error(`Firecrawl response exceeded the size limit (${maxBytes})`);
+      }
+      chunks.push(decoder.decode(result.value, { stream: true }));
+    }
+    chunks.push(decoder.decode());
+    return chunks.join("");
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error("Firecrawl request cancelled");
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error("Firecrawl request cancelled"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }

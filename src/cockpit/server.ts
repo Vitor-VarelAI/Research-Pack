@@ -1,5 +1,7 @@
+import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { loadCockpitModel } from "./adapter.js";
+import { createControlPlane, type ControlPlane, type ControlPlaneOptions } from "./control-plane.js";
 import { renderCockpitHtml } from "./renderer.js";
 import type { AdapterOptions } from "./types.js";
 
@@ -7,15 +9,22 @@ export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 4173;
 export const UNSAFE_HOST_OPT_IN = "SCRAPE_AGENT_ALLOW_UNSAFE_HOST";
 
-export type CockpitServerOptions = AdapterOptions & {
+export type CockpitServerOptions = AdapterOptions & ControlPlaneOptions & {
   host?: string;
   port?: number;
+  controlPlane?: ControlPlane;
 };
 
 export function createCockpitServer(options: CockpitServerOptions = {}): Server {
+  let controlPlane: ControlPlane | undefined;
+  try {
+    controlPlane = options.controlPlane ?? createControlPlane(options);
+  } catch {
+    // Defer unsafe option access to the request boundary, where it becomes a safe 500.
+  }
   return createServer(async (request, response) => {
     try {
-      await handleCockpitRequest(request, response, options);
+      await handleCockpitRequest(request, response, options, controlPlane);
     } catch {
       writeSafeError(response, request.method === "HEAD");
     }
@@ -25,8 +34,23 @@ export function createCockpitServer(options: CockpitServerOptions = {}): Server 
 export async function handleCockpitRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  options: AdapterOptions = {},
+  options: CockpitServerOptions = {},
+  suppliedControlPlane?: ControlPlane,
 ): Promise<void> {
+  let url: URL;
+  try {
+    url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+  } catch {
+    writeText(response, 400, "Pedido inválido\n", request.method === "HEAD");
+    return;
+  }
+
+  const controlPlane = suppliedControlPlane ?? createControlPlane(options);
+  if (url.pathname.startsWith("/api/jobs")) {
+    await controlPlane.handle(request, response, url.pathname);
+    return;
+  }
+
   if (request.method !== "GET" && request.method !== "HEAD") {
     response.writeHead(405, {
       "Allow": "GET, HEAD",
@@ -37,14 +61,6 @@ export async function handleCockpitRequest(
     return;
   }
 
-  let url: URL;
-  try {
-    url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
-  } catch {
-    writeText(response, 400, "Pedido inválido\n", request.method === "HEAD");
-    return;
-  }
-
   if (url.pathname !== "/" && url.pathname !== "/index.html") {
     writeText(response, 404, "Não encontrado\n", request.method === "HEAD");
     return;
@@ -52,22 +68,30 @@ export async function handleCockpitRequest(
 
   const selectedSlug = url.searchParams.get("package") ?? undefined;
   try {
-    const model = await loadCockpitModel(options, selectedSlug);
-    const html = renderCockpitHtml(model);
-    writeHtml(response, 200, html, request.method === "HEAD");
+    const jobs = await controlPlane.getJobs();
+    const completedSlug = jobs.find((job) => job.state === "completed" && job.packageSlug)?.packageSlug ?? undefined;
+    const model = await loadCockpitModel(options, selectedSlug ?? completedSlug);
+    const scriptNonce = randomBytes(18).toString("base64");
+    const html = renderCockpitHtml(model, {
+      actionsEnabled: controlPlane.actionsEnabled,
+      csrfToken: controlPlane.csrfToken,
+      jobs,
+      scriptNonce,
+    });
+    writeHtml(response, 200, html, request.method === "HEAD", scriptNonce);
   } catch {
     writeSafeError(response, request.method === "HEAD");
   }
 }
 
-function writeHtml(response: ServerResponse, status: number, html: string, head: boolean): void {
+function writeHtml(response: ServerResponse, status: number, html: string, head: boolean, scriptNonce?: string): void {
   const headers = {
     "Content-Type": "text/html; charset=utf-8",
     "Content-Length": Buffer.byteLength(html, "utf8").toString(),
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'none'; font-src 'none'",
+    "Content-Security-Policy": `default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; script-src 'self'${scriptNonce ? ` 'nonce-${scriptNonce}'` : ""}; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'none'; font-src 'none'`,
   };
   response.writeHead(status, headers);
   response.end(head ? undefined : html);

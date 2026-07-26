@@ -18,7 +18,7 @@
     "qa:content": "scripts/content-qa.sh",
     "export:html": "tsx src/export-html.ts",
     "cockpit": "tsx src/cockpit/server.ts",
-    "test:cockpit": "node --import tsx --test tests/cockpit.test.ts"
+    "test:cockpit": "node --import tsx --test tests/cockpit.test.ts tests/cockpit-control-plane.test.ts"
   },
   "keywords": [
     "scraping",

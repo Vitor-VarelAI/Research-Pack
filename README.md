@@ -7,7 +7,10 @@ Backend-first scrape agent MVP powered by Firecrawl.
 ```bash
 cd ~/projects/scrape-agent
 cp .env.example .env
-# edit .env and set FIRECRAWL_API_KEY
+# edit .env and set FIRECRAWL_API_KEY plus the explicit DeepSeek variables
+# DEEPSEEK_API_KEY=...
+# DEEPSEEK_BASE_URL=https://...
+# DEEPSEEK_MODEL=...
 npm install
 npm run build
 ```
@@ -29,7 +32,7 @@ npm run export:html -- /absolute/path/to/editorial-package
 
 ## Visual cockpit
 
-The cockpit is a read-only operational view over existing artifacts. It does not import, execute, or change the scrape pipeline. The default data root is `data/`; point it at an existing runtime data directory with `SCRAPE_AGENT_DATA_DIR`.
+The cockpit is a private editorial operations desk over existing artifacts and the fixed control-plane API. Actions remain disabled by default; set `SCRAPE_AGENT_COCKPIT_ACTIONS=1` and the exact server-only `SCRAPE_AGENT_COCKPIT_ORIGIN` only after local validation. The runner accepts a validated URL or topic, uses bounded Firecrawl discovery and direct DeepSeek generation, and never accepts shell, provider, model, prompt, executable or path options from the browser. Read-only browsing starts without provider credentials because production configuration is resolved only on a mutating action. The default data root is `data/`; point it at an existing runtime data directory with `SCRAPE_AGENT_DATA_DIR`.
 
 ```bash
 SCRAPE_AGENT_DATA_DIR=/home/vitor/projects/scrape-agent/data npm run cockpit
@@ -157,7 +160,6 @@ profiles/editorial/diagnose.md  Strategic diagnosis format
 
 ## Next steps
 
-- Add `research "topic"` command that outputs `profiles/editorial/research-pack.md` format.
 - Add `diagnose <research-pack.md>` command that outputs `profiles/editorial/diagnose.md` format.
 - Add a first-class `angle`/`diagnose-news` CLI command.
 - Expand `profiles/radar/` into source-specific radar profiles.

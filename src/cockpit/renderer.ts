@@ -2,6 +2,7 @@ import { marked } from "marked";
 import sanitizeHtml from "sanitize-html";
 import type { Publication } from "../schemas/publication.js";
 import type { SourceGateResult } from "../schemas/source-gate.js";
+import type { SafeJob, SafeStage } from "./control-plane.js";
 import type { Artifact, CockpitModel, CockpitPackage, MarkdownArtifact, QaEvidence } from "./types.js";
 
 const MARKDOWN_TAGS = [
@@ -85,7 +86,14 @@ export function safeExternalUrl(value: string | undefined): string | undefined {
   }
 }
 
-export function renderCockpitHtml(model: CockpitModel): string {
+export type CockpitRenderOptions = {
+  actionsEnabled?: boolean;
+  csrfToken?: string;
+  jobs?: SafeJob[];
+  scriptNonce?: string;
+};
+
+export function renderCockpitHtml(model: CockpitModel, options: CockpitRenderOptions = {}): string {
   const selected = model.selectedPackage;
   const title = selected?.manifest.value?.title ?? "Cockpit editorial";
   const description = selected?.manifest.value?.description ?? "Leitura operacional dos artefactos editoriais, sem execução do pipeline.";
@@ -94,12 +102,15 @@ export function renderCockpitHtml(model: CockpitModel): string {
   const packageOptions = model.packages.length > 0
     ? model.packages.map((item) => `<option value="${escapeHtml(item.slug)}"${item.slug === model.selectedSlug ? " selected" : ""}>${escapeHtml(item.title)}${item.publishedOn ? ` · ${escapeHtml(formatDate(item.publishedOn))}` : ""}</option>`).join("")
     : `<option value="">Nenhum pacote disponível</option>`;
+  const actionsEnabled = options.actionsEnabled === true;
+  const actionLabel = actionsEnabled ? "Ações disponíveis" : "Apenas leitura";
 
   return `<!doctype html>
 <html lang="pt-PT">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="${escapeHtml(options.csrfToken ?? "")}">
   <meta name="description" content="${escapeHtml(description)}">
   <title>${escapeHtml(title)} · Cockpit</title>
   <style>${styles()}</style>
@@ -107,7 +118,7 @@ export function renderCockpitHtml(model: CockpitModel): string {
 <body>
   <header class="mobile-header">
     <a class="wordmark" href="#radar" aria-label="Cockpit editorial, ir para Radar">VV / cockpit</a>
-    <span class="read-only">Somente leitura</span>
+    <span class="read-only action-state" data-action-state>${escapeHtml(actionLabel)}</span>
   </header>
   <div class="app-shell">
     <aside class="sidebar" aria-label="Navegação principal">
@@ -118,7 +129,7 @@ export function renderCockpitHtml(model: CockpitModel): string {
       <nav class="section-nav" aria-label="Áreas do cockpit">${nav}</nav>
       <div class="sidebar-foot">
         <span class="status-dot" aria-hidden="true"></span>
-        <span>Leitura local</span>
+        <span class="action-state" data-action-state>${escapeHtml(actionLabel)}</span>
       </div>
     </aside>
     <div class="workspace">
@@ -132,10 +143,11 @@ export function renderCockpitHtml(model: CockpitModel): string {
           <label for="package-select">Pacote</label>
           <select id="package-select" name="package" aria-label="Selecionar pacote editorial">${packageOptions}</select>
           <span class="freshness"><span class="status-dot" aria-hidden="true"></span>${model.freshness ? `Atualizado ${escapeHtml(model.freshness)}` : "Sem data de atualização"}</span>
-          <span class="read-only">Somente leitura</span>
+          <span class="read-only action-state" data-action-state>${escapeHtml(actionLabel)}</span>
         </div>
       </header>
       ${allWarnings.length > 0 ? renderWarnings(allWarnings) : ""}
+      ${renderControlPlane(options.jobs ?? [], actionsEnabled, options.csrfToken ?? "")}
       ${renderSummary(model, selected)}
       <main>
         <section id="radar" class="section" aria-labelledby="radar-title">
@@ -163,12 +175,89 @@ export function renderCockpitHtml(model: CockpitModel): string {
           ${renderQa(selected)}
         </section>
       </main>
-      <footer class="footer"><span>Read model local · sem escrita de dados</span><span>PT-PT · seis áreas operacionais</span></footer>
+      <footer class="footer"><span>Read model local · ${actionsEnabled ? "ações controladas" : "sem escrita de dados"}</span><span class="action-state" data-action-state>${escapeHtml(actionLabel)}</span><span>PT-PT · seis áreas operacionais</span></footer>
     </div>
   </div>
-  <script>${clientScript()}</script>
+  <script${options.scriptNonce ? ` nonce="${escapeHtml(options.scriptNonce)}"` : ""}>${clientScript(options.csrfToken ?? "")}</script>
 </body>
 </html>`;
+}
+
+function renderControlPlane(jobs: SafeJob[], actionsEnabled: boolean, csrfToken: string): string {
+  const active = jobs.find((job) => !["completed", "failed", "cancelled", "interrupted"].includes(job.state));
+  const status = actionsEnabled ? "Ações disponíveis" : "Apenas leitura";
+  const recent = jobs.length > 0 ? jobs.slice(0, 4).map((job) => renderJobCard(job, actionsEnabled)).join("") : `<p class="muted">Ainda não existem processos controlados pelo cockpit.</p>`;
+  return `<section class="control-plane" id="controlo" data-actions-enabled="${actionsEnabled ? "true" : "false"}" aria-labelledby="control-plane-title">
+    <div class="control-plane-heading"><div><p class="kicker">Control plane / processo editorial</p><h2 id="control-plane-title">Mesa de operação</h2><p class="section-note">Um processo de cada vez, com decisões humanas nos pontos certos.</p></div><div class="control-plane-actions"><span class="control-status ${actionsEnabled ? "is-on" : "is-off"}" id="control-status" role="status"><span class="status-dot" aria-hidden="true"></span>${status}</span><button class="primary-button" id="new-content" type="button"${actionsEnabled && !active ? "" : " disabled"} aria-haspopup="dialog">Novo conteúdo</button></div></div>
+    <div class="control-jobs" id="control-jobs" aria-label="Processos recentes">${recent}</div><p class="sr-only" id="control-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
+  </section>
+  <dialog class="compose-dialog" id="compose-dialog" aria-labelledby="compose-title">
+    <form id="compose-form" method="dialog">
+      <div class="dialog-head"><div><p class="kicker">Novo processo / 01</p><h2 id="compose-title">Começar conteúdo</h2></div><button class="icon-button" id="compose-close" type="button" aria-label="Fechar">×</button></div>
+      <div class="compose-step" id="compose-step-input">
+        <fieldset><legend>Partir de</legend><div class="choice-row"><label class="choice-card"><input type="radio" name="source-kind" value="url" checked><span><strong>URL</strong><small>Uma fonte concreta para pesquisar.</small></span></label><label class="choice-card"><input type="radio" name="source-kind" value="topic"><span><strong>Tema</strong><small>Uma pergunta ou assunto para investigar.</small></span></label></div></fieldset>
+        <label class="field-label" for="compose-value" id="compose-value-label">URL</label><input class="text-input" id="compose-value" name="value" type="url" required maxlength="500" inputmode="url" autocomplete="url" placeholder="https://exemplo.pt/artigo">
+        <label class="field-label" for="compose-context">Contexto <span>opcional</span></label><textarea class="text-input" id="compose-context" name="context" rows="4" maxlength="4000" placeholder="O que deve orientar a leitura? (opcional)"></textarea>
+        <div class="fixed-output"><span class="eyebrow">Saída</span><strong>Blog + formatos</strong><span>Os sete formatos editoriais e dez slides.</span></div><p class="dialog-error" id="compose-error" role="alert" hidden></p>
+        <label class="toggle-row"><input type="checkbox" id="compose-html" name="exportHtml"><span><strong>Preparar exportação HTML</strong><small>Opcional; o cockpit continua a abrir o pacote editorial.</small></span></label>
+        <div class="dialog-actions"><button class="secondary-button" id="compose-cancel" type="button">Cancelar</button><button class="primary-button" id="compose-next" type="button">Rever resumo</button></div>
+      </div>
+      <div class="compose-step" id="compose-step-confirm" hidden><p class="kicker">Novo processo / 02</p><h3>Confirma o percurso</h3><dl class="confirmation" id="compose-confirmation"></dl><p class="confirm-note">O processo começa em background e o cockpit acompanha-o por polling.</p><div class="dialog-actions"><button class="secondary-button" id="compose-back" type="button">Voltar</button><button class="primary-button" id="compose-submit" type="submit">Iniciar processo</button></div></div>
+    </form>
+  </dialog>
+  <dialog class="compose-dialog reject-dialog" id="reject-dialog" aria-labelledby="reject-title"><form id="reject-form" method="dialog"><div class="dialog-head"><div><p class="kicker">Revisão final</p><h2 id="reject-title">Rejeitar draft</h2></div><button class="icon-button" id="reject-close" type="button" aria-label="Fechar">×</button></div><label class="field-label" for="reject-note">Nota <span>opcional</span></label><textarea class="text-input" id="reject-note" maxlength="1000" rows="5" placeholder="O que deve ser revisto?"></textarea><p class="dialog-error" id="reject-error" role="alert" hidden></p><div class="dialog-actions"><button class="secondary-button" id="reject-cancel" type="button">Voltar</button><button class="primary-button" id="reject-submit" type="submit">Confirmar rejeição</button></div></form></dialog>`;
+}
+
+function renderJobCard(job: SafeJob, actionsEnabled: boolean): string {
+  const active = !["completed", "failed", "cancelled", "interrupted"].includes(job.state);
+  const stateLabel = stateCopy(job.state);
+  return `<article class="job-card ${active ? "is-active" : ""}" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><span class="eyebrow">${active ? "Em curso" : "Recente"}</span><h3>${escapeHtml(inputLabel(job.input))}</h3></div><span class="job-state ${stateClass(job.state)}">${escapeHtml(stateLabel)}</span></div>${active || job.state === "failed" || job.state === "interrupted" ? renderTimeline(job) : `<p class="job-result">${job.state === "completed" ? "Pacote concluído e pronto a abrir." : escapeHtml(job.error?.message ?? "Processo terminado.")}</p>`}${actionsEnabled ? renderJobDecision(job) : ""}</article>`;
+}
+
+function renderTimeline(job: SafeJob): string {
+  return `<ol class="editorial-timeline" aria-label="Progresso editorial">${job.stages.map((stage) => `<li class="timeline-stage is-${escapeHtml(stage.status)}"><span class="timeline-marker" aria-hidden="true"></span><div><strong>${escapeHtml(stage.label)}</strong><span class="timeline-meta">${escapeHtml(stageStatus(stage.status))}${stage.durationMs !== null ? ` · ${escapeHtml(formatDuration(stage.durationMs))}` : ""}</span>${stage.warning ? `<p class="timeline-warning">${escapeHtml(stage.warning)}</p>` : ""}${stage.artifactKinds.length > 0 ? `<span class="artifact-count">${escapeHtml(String(stage.artifactKinds.length))} artefacto(s)</span>` : ""}</div></li>`).join("")}</ol>`;
+}
+
+function renderJobDecision(job: SafeJob): string {
+  if (job.state === "awaiting_angle") return `<div class="decision-desk"><div><span class="eyebrow">Decisão necessária</span><strong>Escolhe um ângulo</strong><p>Há exatamente três leituras propostas para este processo.</p></div><div class="angle-cards">${job.angles.slice(0, 3).map((angle) => `<article class="angle-card"><span class="angle-number">${escapeHtml(angle.id)}</span><h3>${escapeHtml(angle.title)}</h3><p>${escapeHtml(angle.thesis)}</p><p class="angle-why"><strong>Porque agora:</strong> ${escapeHtml(angle.whyNow)}</p><span class="evidence-count">${escapeHtml(String(angle.evidenceCount))} evidência(s)</span><button class="secondary-button angle-select" type="button" data-angle-id="${escapeHtml(angle.id)}" data-job-id="${escapeHtml(job.id)}">Escolher este ângulo</button></article>`).join("")}</div><button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button></div>`;
+  if (job.state === "awaiting_final_approval") return `<div class="decision-desk review-desk"><div><span class="eyebrow">Decisão necessária</span><strong>Revisão final</strong><p>Confirma o draft, a verificação e as saídas antes de promover o pacote.</p></div>${job.review ? `<div class="review-summary"><h3>${escapeHtml(job.review.title)}</h3><p>${escapeHtml(job.review.description)}</p><div class="review-metrics"><span>QA <b>${escapeHtml(job.review.qaVerdict)}</b></span><span>${escapeHtml(String(job.review.formatCount))} formatos</span><span>${escapeHtml(String(job.review.slideCount))} slides</span><span>${escapeHtml(String(job.review.qaWarnings))} aviso(s)</span></div></div>` : `<p class="muted">Resumo de revisão indisponível.</p>`}<div class="review-actions"><button class="secondary-button reject-job" type="button" data-job-id="${escapeHtml(job.id)}">Rejeitar</button><button class="primary-button approve-job" type="button" data-job-id="${escapeHtml(job.id)}">Aprovar</button></div><button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button></div>`;
+  if (["failed", "interrupted"].includes(job.state)) return `<div class="decision-desk"><div><span class="eyebrow">Ação disponível</span><strong>${escapeHtml(job.error?.message ?? "O processo precisa de atenção.")}</strong><p class="timeline-warning">Repetir pode repetir etapas pagas.</p>${job.rejectionNote ? `<p class="job-result"><strong>Nota:</strong> ${escapeHtml(job.rejectionNote)}</p>` : ""}</div><div class="review-actions"><button class="primary-button retry-job" type="button" data-job-id="${escapeHtml(job.id)}">Repetir etapa</button></div></div>`;
+  if (!["completed", "cancelled"].includes(job.state)) return `<button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button>`;
+  return "";
+}
+
+function inputLabel(input: SafeJob["input"]): string {
+  return input.kind === "url" ? safeDisplayUrl(input.url) : input.topic;
+}
+
+function safeDisplayUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return "URL não disponível";
+  }
+}
+
+function stateCopy(state: SafeJob["state"]): string {
+  const labels: Record<SafeJob["state"], string> = { queued: "Na fila", researching: "A pesquisar", source_gate: "Source gate", awaiting_angle: "A aguardar decisão", diagnosing: "Diagnóstico", drafting: "Draft", formatting: "Formatos", qa: "QA", awaiting_final_approval: "A aguardar decisão", completed: "Concluído", failed: "Falhou", cancelled: "Cancelado", interrupted: "Interrompido" };
+  return labels[state];
+}
+
+function stateClass(state: SafeJob["state"]): string {
+  return ["failed", "interrupted"].includes(state) ? "is-warning" : ["completed"].includes(state) ? "is-good" : ["awaiting_angle", "awaiting_final_approval"].includes(state) ? "is-decision" : "is-neutral";
+}
+
+function stageStatus(status: SafeStage["status"]): string {
+  return ({ pending: "Pendente", running: "Em curso", completed: "Concluída", blocked: "Bloqueada", failed: "Falhou" } as const)[status];
+}
+
+function formatDuration(value: number): string {
+  const seconds = Math.max(0, Math.round(value / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
 function renderSummary(model: CockpitModel, selected: CockpitPackage | undefined): string {
@@ -242,9 +331,12 @@ function renderQa(selected: CockpitPackage | undefined): string {
   const explicitSignals = [canonicalSignal, humanSignal, ...workerSignals].filter(isQaVerdict);
   const hasContradiction = canonicalSignal === "CONTRADITÓRIO" || workerStates.includes("CONTRADITÓRIO");
   const disagreement = hasContradiction || new Set(explicitSignals).size > 1;
+  const hasFinalEditorialLint = selected.qa.lint.some((item) => item.kind === "editorial-lint" && item.final && item.artifact.status === "ok" && conservativeEvidenceDecision(item.artifact.value) === "PASS");
+  const hasFinalFormatsLint = selected.qa.lint.some((item) => item.kind === "formats-lint" && item.final && item.artifact.status === "ok" && conservativeEvidenceDecision(item.artifact.value) === "PASS");
   const allRequiredPass = canonicalSignal === "PASS"
     && humanSignal === "PASS"
-    && workerEvidence.length > 0
+    && hasFinalEditorialLint
+    && hasFinalFormatsLint
     && workerStates.every((state) => state === "PASS");
   const combinedVerdict = allRequiredPass
     ? "PASS"
@@ -417,9 +509,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function clientScript(): string {
+function clientScript(csrfToken: string): string {
   return `(() => {
+  const csrfToken = ${JSON.stringify(csrfToken)};
+  let actionsEnabled = document.getElementById('controlo')?.getAttribute('data-actions-enabled') === 'true';
   const select = document.getElementById('package-select');
+  const jobsRoot = document.getElementById('control-jobs');
+  const status = document.getElementById('control-status');
+  const dialog = document.getElementById('compose-dialog');
+  const rejectDialog = document.getElementById('reject-dialog');
+  const rejectForm = document.getElementById('reject-form');
+  const rejectNote = document.getElementById('reject-note');
+  let rejectingJobId;
+  let rejectTrigger;
+  const form = document.getElementById('compose-form');
+  const sourceValue = document.getElementById('compose-value');
+  const sourceLabel = document.getElementById('compose-value-label');
+  const contextValue = document.getElementById('compose-context');
+  const htmlToggle = document.getElementById('compose-html');
+  const composeError = document.getElementById('compose-error');
+  const rejectError = document.getElementById('reject-error');
+  let composeTrigger;
+  let lastJobStates = new Map();
+  let polling = false;
+  let pollTimer;
+
   select?.addEventListener('change', () => {
     const value = select.value;
     const url = new URL(window.location.href);
@@ -455,6 +569,214 @@ function clientScript(): string {
       activateTab(tabs[next]);
     });
   });
+
+  function element(tag, value, className) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value !== undefined) node.textContent = String(value);
+    return node;
+  }
+  function button(label, className, handler, attributes) {
+    const node = element('button', label, className);
+    node.type = 'button';
+    Object.entries(attributes || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
+    return node;
+  }
+  function renderJob(job) {
+    const card = element('article', undefined, 'job-card' + (['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state) ? '' : ' is-active'));
+    card.dataset.jobId = job.id;
+    const head = element('div', undefined, 'job-card-head');
+    const copy = element('div');
+    copy.append(element('span', 'Processo editorial', 'eyebrow'), element('h3', job.input.kind === 'url' ? safeDisplayUrl(job.input.url) : job.input.topic));
+    head.append(copy, element('span', stateLabel(job.state), 'job-state ' + stateClass(job.state)));
+    card.append(head);
+    if (job.stages) {
+      const timeline = element('ol', undefined, 'editorial-timeline');
+      job.stages.forEach((stage) => {
+        const item = element('li', undefined, 'timeline-stage is-' + stage.status);
+        const body = element('div');
+        body.append(element('span', '', 'timeline-marker'), element('strong', stage.label), element('span', (stage.status === 'running' ? 'Em curso' : stage.status === 'completed' ? 'Concluída' : stage.status === 'failed' ? 'Falhou' : stage.status === 'blocked' ? 'Bloqueada' : 'Pendente') + (stage.durationMs !== null && stage.durationMs !== undefined ? ' · ' + formatStageDuration(stage.durationMs) : ''), 'timeline-meta'));
+        if (stage.warning) body.append(element('p', stage.warning, 'timeline-warning'));
+        if (Array.isArray(stage.artifactKinds) && stage.artifactKinds.length) body.append(element('span', stage.artifactKinds.length + ' artefacto(s)', 'artifact-count'));
+        item.append(body);
+        timeline.append(item);
+      });
+      card.append(timeline);
+    }
+    if (actionsEnabled && job.state === 'awaiting_angle' && Array.isArray(job.angles)) {
+      const desk = element('div', undefined, 'decision-desk');
+      desk.append(element('strong', 'Escolhe um ângulo'));
+      const cards = element('div', undefined, 'angle-cards');
+      job.angles.slice(0, 3).forEach((angle) => {
+        const candidate = element('article', undefined, 'angle-card');
+        candidate.append(element('h3', angle.title), element('p', angle.thesis), element('p', 'Porque agora: ' + angle.whyNow, 'angle-why'), element('span', angle.evidenceCount + ' evidência(s)', 'evidence-count'));
+        candidate.append(button('Escolher este ângulo', 'secondary-button angle-select', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/select-angle', { angleId: angle.id }), { 'data-job-id': job.id, 'data-angle-id': angle.id }));
+        cards.append(candidate);
+      });
+      desk.append(cards, button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
+      card.append(desk);
+    } else if (job.state === 'awaiting_final_approval') {
+      const desk = element('div', undefined, 'decision-desk review-desk');
+      desk.append(element('strong', 'Revisão final'));
+      if (job.review) desk.append(element('h3', job.review.title), element('p', job.review.description), element('p', 'QA ' + job.review.qaVerdict + ' · ' + job.review.formatCount + ' formatos · ' + job.review.slideCount + ' slides'));
+      const actions = element('div', undefined, 'review-actions');
+      actions.append(button('Rejeitar', 'secondary-button reject-job', () => rejectJob(job.id), { 'data-job-id': job.id }), button('Aprovar', 'primary-button approve-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/approve', { decision: 'approve' }), { 'data-job-id': job.id }));
+      desk.append(actions, button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
+      card.append(desk);
+    } else if (job.state === 'failed' || job.state === 'interrupted') {
+      card.append(element('p', 'Repetir pode repetir etapas pagas.', 'timeline-warning'));
+      if (job.rejectionNote) card.append(element('p', 'Nota: ' + job.rejectionNote, 'job-result'));
+      card.append(button('Repetir etapa', 'primary-button retry-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/retry', {}), { 'data-job-id': job.id }));
+    } else if (['queued', 'researching', 'source_gate', 'diagnosing', 'drafting', 'formatting', 'qa'].includes(job.state)) {
+      card.append(button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
+    }
+    if (job.state === 'completed' && job.packageSlug && select) {
+      select.value = job.packageSlug;
+      const url = new URL(window.location.href);
+      url.searchParams.set('package', job.packageSlug);
+      if (new URL(window.location.href).searchParams.get('package') !== job.packageSlug) window.location.assign(url.pathname + url.search + window.location.hash);
+    }
+    return card;
+  }
+  function formatStageDuration(value) {
+    const seconds = Math.max(0, Math.round(Number(value) / 1000));
+    return seconds < 60 ? seconds + 's' : Math.floor(seconds / 60) + 'm ' + seconds % 60 + 's';
+  }
+  function stateLabel(value) {
+    return ({ queued: 'Na fila', researching: 'A pesquisar', source_gate: 'Source gate', awaiting_angle: 'A aguardar decisão', diagnosing: 'Diagnóstico', drafting: 'Draft', formatting: 'Formatos', qa: 'QA', awaiting_final_approval: 'A aguardar decisão', completed: 'Concluído', failed: 'Falhou', cancelled: 'Cancelado', interrupted: 'Interrompido' })[value] || 'Estado do processo';
+  }
+  function stateClass(value) {
+    return value === 'completed' ? 'is-good' : value === 'failed' || value === 'interrupted' ? 'is-warning' : value === 'awaiting_angle' || value === 'awaiting_final_approval' ? 'is-decision' : 'is-neutral';
+  }
+  function safeDisplayUrl(value) {
+    try { const parsed = new URL(value); parsed.search = ''; parsed.hash = ''; return parsed.toString(); } catch { return 'URL não disponível'; }
+  }
+  function updateActionState(jobs) {
+    const section = document.getElementById('controlo');
+    const apiEnabled = section?.getAttribute('data-actions-enabled') === 'true';
+    actionsEnabled = apiEnabled;
+    const active = jobs.some((job) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state));
+    document.querySelectorAll('[data-action-state]').forEach((node) => { node.textContent = actionsEnabled ? 'Ações disponíveis' : 'Apenas leitura'; });
+    const newContent = document.getElementById('new-content');
+    if (newContent) newContent.disabled = !actionsEnabled || active;
+    if (status && !status.classList.contains('is-error')) { status.textContent = actionsEnabled ? 'Ações disponíveis' : 'Apenas leitura'; status.classList.toggle('is-off', !actionsEnabled); status.classList.toggle('is-on', actionsEnabled); }
+  }
+  function announceJobs(jobs) {
+    const next = new Map(jobs.map((job) => [job.id, job.state]));
+    const changed = jobs.find((job) => lastJobStates.has(job.id) && lastJobStates.get(job.id) !== job.state);
+    if (changed) announce('Processo atualizado: ' + stateLabel(changed.state));
+    lastJobStates = next;
+  }
+  function announce(message) {
+    const node = document.getElementById('control-announcement');
+    if (!node) return;
+    node.textContent = '';
+    window.setTimeout(() => { node.textContent = message; }, 0);
+  }
+  function renderJobs(jobs) {
+    if (!jobsRoot) return;
+    updateActionState(jobs);
+    announceJobs(jobs);
+    jobsRoot.replaceChildren();
+    if (!jobs.length) jobsRoot.append(element('p', 'Ainda não existem processos controlados pelo cockpit.', 'muted'));
+    jobs.slice(0, 4).forEach((job) => jobsRoot.append(renderJob(job)));
+  }
+  async function mutate(path, payload) {
+    if (!actionsEnabled) return false;
+    try {
+      const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify(payload), credentials: 'same-origin' });
+      let body = {};
+      try { body = await response.json(); } catch { /* empty response */ }
+      if (!response.ok) throw new Error(body.error?.message || 'A operação não pôde ser concluída.');
+      await poll();
+      return response.status === 202;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'A operação não pôde ser concluída.';
+      if (status) { status.textContent = message; status.classList.add('is-off', 'is-error'); }
+      if (path === '/api/jobs' || path.endsWith('/api/jobs')) showDialogError(composeError, message);
+      if (rejectingJobId && path.includes('/approve')) showDialogError(rejectError, message);
+      return false;
+    }
+  }
+  function showDialogError(node, message) {
+    if (!node) return;
+    node.textContent = message;
+    node.hidden = false;
+  }
+  function rejectJob(id) {
+    rejectingJobId = id;
+    rejectTrigger = document.activeElement;
+    if (rejectNote) rejectNote.value = '';
+    if (rejectError) rejectError.hidden = true;
+    if (rejectDialog?.showModal) { rejectDialog.showModal(); window.setTimeout(() => rejectNote?.focus(), 0); }
+  }
+  function closeDialogSafely(target, trigger) { if (target?.open) target.close(); window.setTimeout(() => trigger?.focus(), 0); }
+  document.getElementById('reject-close')?.addEventListener('click', () => closeDialogSafely(rejectDialog, rejectTrigger));
+  document.getElementById('reject-cancel')?.addEventListener('click', () => closeDialogSafely(rejectDialog, rejectTrigger));
+  rejectDialog?.addEventListener('cancel', (event) => { event.preventDefault(); closeDialogSafely(rejectDialog, rejectTrigger); });
+  rejectForm?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const note = rejectNote?.value.trim() || undefined;
+    if (rejectingJobId && await mutate('/api/jobs/' + encodeURIComponent(rejectingJobId) + '/approve', note ? { decision: 'reject', note } : { decision: 'reject' })) closeDialogSafely(rejectDialog, rejectTrigger);
+  });
+  async function poll() {
+    if (polling || document.hidden) return;
+    polling = true;
+    try {
+      const response = await fetch('/api/jobs', { headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (Array.isArray(data.jobs)) renderJobs(data.jobs);
+      const active = Array.isArray(data.jobs) && data.jobs.some((job) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state));
+      if (active) {
+        const current = data.jobs.find((job) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state));
+        if (current) {
+          const detailResponse = await fetch('/api/jobs/' + encodeURIComponent(current.id), { headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store' });
+          if (detailResponse.ok) { const detail = await detailResponse.json(); if (detail.job) renderJobs([detail.job].concat(data.jobs.filter((job) => job.id !== detail.job.id))); }
+        }
+      }
+    } catch { /* A próxima consulta recupera um cockpit temporariamente indisponível. */ }
+    finally { polling = false; schedulePoll(); }
+  }
+  function schedulePoll() { if (pollTimer) window.clearTimeout(pollTimer); pollTimer = window.setTimeout(() => void poll(), 2500); }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) void poll(); });
+  jobsRoot?.addEventListener('click', (event) => {
+    const target = event.target instanceof Element ? event.target.closest('button') : null;
+    if (!target || !jobsRoot.contains(target)) return;
+    const id = target.getAttribute('data-job-id') || '';
+    if (target.classList.contains('angle-select')) void mutate('/api/jobs/' + encodeURIComponent(id) + '/select-angle', { angleId: target.getAttribute('data-angle-id') || '' });
+    else if (target.classList.contains('cancel-job')) void mutate('/api/jobs/' + encodeURIComponent(id) + '/cancel', {});
+    else if (target.classList.contains('approve-job')) void mutate('/api/jobs/' + encodeURIComponent(id) + '/approve', { decision: 'approve' });
+    else if (target.classList.contains('reject-job')) rejectJob(id);
+    else if (target.classList.contains('retry-job')) void mutate('/api/jobs/' + encodeURIComponent(id) + '/retry', {});
+  });
+
+  function openCompose() { if (actionsEnabled && dialog?.showModal) { composeTrigger = document.activeElement; if (composeError) composeError.hidden = true; dialog.showModal(); window.setTimeout(() => sourceValue?.focus(), 0); } }
+  function closeCompose() { closeDialogSafely(dialog, composeTrigger); }
+  document.getElementById('new-content')?.addEventListener('click', openCompose);
+  document.getElementById('compose-close')?.addEventListener('click', closeCompose);
+  document.getElementById('compose-cancel')?.addEventListener('click', closeCompose);
+  dialog?.addEventListener('cancel', (event) => { event.preventDefault(); closeCompose(); });
+  document.querySelectorAll('input[name="source-kind"]').forEach((radio) => radio.addEventListener('change', () => {
+    const topic = radio.value === 'topic';
+    if (radio.checked && sourceLabel && sourceValue) { sourceLabel.textContent = topic ? 'Tema' : 'URL'; sourceValue.type = topic ? 'text' : 'url'; sourceValue.setAttribute('placeholder', topic ? 'O que queres investigar?' : 'https://exemplo.pt/artigo'); sourceValue.setAttribute('inputmode', topic ? 'text' : 'url'); sourceValue.setAttribute('autocomplete', topic ? 'off' : 'url'); }
+  }));
+  document.getElementById('compose-next')?.addEventListener('click', () => {
+    if (!form?.reportValidity()) return;
+    const confirmation = document.getElementById('compose-confirmation');
+    const kind = document.querySelector('input[name="source-kind"]:checked')?.value || 'url';
+    if (confirmation) { confirmation.replaceChildren(); [['Entrada', kind === 'topic' ? 'Tema' : 'URL'], [kind === 'topic' ? 'Tema' : 'URL', sourceValue.value.trim()], ['Contexto', contextValue?.value.trim() || 'Sem contexto adicional'], ['Saída', 'Blog + formatos'], ['HTML', htmlToggle?.checked ? 'Sim' : 'Não']].forEach(([label, value]) => { const term = element('dt', label); const detail = element('dd', value); confirmation.append(term, detail); }); }
+    document.getElementById('compose-step-input')?.setAttribute('hidden', ''); document.getElementById('compose-step-confirm')?.removeAttribute('hidden'); document.getElementById('compose-submit')?.focus();
+  });
+  document.getElementById('compose-back')?.addEventListener('click', () => { document.getElementById('compose-step-confirm')?.setAttribute('hidden', ''); document.getElementById('compose-step-input')?.removeAttribute('hidden'); sourceValue?.focus(); });
+  form?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    if (!form.reportValidity()) return;
+    const kind = document.querySelector('input[name="source-kind"]:checked')?.value || 'url';
+    const payload = kind === 'topic' ? { kind: 'topic', topic: sourceValue?.value.trim() || '', context: contextValue?.value.trim() || '', output: 'blog-formats', exportHtml: Boolean(htmlToggle?.checked) } : { kind: 'url', url: sourceValue?.value.trim() || '', context: contextValue?.value.trim() || '', output: 'blog-formats', exportHtml: Boolean(htmlToggle?.checked) };
+    if (await mutate('/api/jobs', payload)) closeCompose();
+  });
+  schedulePoll();
 })();`;
 }
 
@@ -462,7 +784,7 @@ function styles(): string {
   return `
 :root { color-scheme: light; --ink:#162026; --ink-soft:#415057; --paper:#f4f4f0; --card:#fff; --line:#d7dcd9; --line-strong:#b8c1bd; --teal:#14766b; --teal-soft:#dcefe9; --amber:#a55b18; --amber-soft:#fff0dc; --red:#a83735; --shadow:0 10px 30px rgba(21,35,35,.06); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
 * { box-sizing:border-box; }
-html { scroll-behavior:smooth; }
+html { scroll-behavior:smooth; scroll-padding-bottom:calc(24px + env(safe-area-inset-bottom)); }
 body { margin:0; color:var(--ink); background:var(--paper); overflow-x:hidden; }
 a { color:inherit; }
 button, select, a { font:inherit; }
@@ -475,7 +797,6 @@ button, select { min-height:44px; }
 .brand-block p { margin:7px 0 0; color:var(--ink-soft); font-size:.66rem; letter-spacing:.15em; text-transform:uppercase; }
 .section-nav { display:grid; gap:4px; margin-top:62px; }
 .section-nav a { display:flex; align-items:center; min-height:44px; padding:0 10px; border-left:2px solid transparent; color:var(--ink-soft); font-size:.8rem; font-weight:700; text-decoration:none; }
-.section-nav a:hover { color:var(--ink); background:rgba(255,255,255,.56); }
 .section-nav a:active, .tabs button:active { transform:scale(.98); }
 .sidebar-foot { display:flex; align-items:center; gap:8px; margin-top:auto; color:var(--ink-soft); font-size:.7rem; }
 .status-dot, .live-marker { display:inline-block; width:8px; height:8px; flex:0 0 auto; border-radius:50%; background:var(--teal); }
@@ -494,6 +815,86 @@ h4 { margin:0 0 8px; font-size:.68rem; letter-spacing:.08em; text-transform:uppe
 select { width:100%; padding:0 34px 0 12px; border:1px solid var(--line-strong); border-radius:5px; background:var(--card); color:var(--ink); font-weight:750; }
 .read-only, .freshness { display:inline-flex; align-items:center; gap:7px; color:var(--ink-soft); font-size:.68rem; font-weight:700; }
 .freshness { margin-top:5px; }
+.control-plane { margin:24px clamp(24px,5vw,76px) 0; padding:22px; border:1px solid var(--line-strong); border-radius:9px; background:#e9f2ee; }
+.control-plane-heading { display:flex; justify-content:space-between; gap:24px; align-items:end; }
+.control-plane-heading h2 { font-size:clamp(1.5rem,2.4vw,2.4rem); }
+.control-plane-actions { display:flex; align-items:center; gap:12px; }
+.control-status { display:inline-flex; min-height:32px; align-items:center; gap:7px; padding:0 10px; border:1px solid #b8d8ce; border-radius:999px; color:#22685e; font-size:.67rem; font-weight:850; }
+.control-status.is-off { border-color:#e6c596; background:var(--amber-soft); color:#80501f; }
+.primary-button, .secondary-button, .danger-quiet, .icon-button { display:inline-flex; min-height:44px; align-items:center; justify-content:center; padding:0 15px; border:1px solid transparent; border-radius:5px; cursor:pointer; font-size:.74rem; font-weight:850; }
+.primary-button { background:var(--ink); color:var(--paper); }
+.secondary-button { border-color:var(--line-strong); background:var(--card); color:var(--ink); }
+.danger-quiet { padding-inline:0; border:0; background:transparent; color:var(--red); text-decoration:underline; text-underline-offset:3px; }
+.primary-button:disabled, .secondary-button:disabled, .danger-quiet:disabled { cursor:not-allowed; opacity:.5; }
+.primary-button:active, .secondary-button:active, .danger-quiet:active, .icon-button:active { transform:scale(.98); }
+.control-jobs { display:grid; gap:10px; margin-top:20px; }
+.job-card { min-width:0; padding:18px; border:1px solid var(--line); border-radius:7px; background:var(--card); box-shadow:var(--shadow); }
+.job-card.is-active { border-left:4px solid var(--teal); }
+.job-card-head { display:flex; justify-content:space-between; gap:16px; align-items:start; }
+.job-card-head h3 { max-width:760px; margin-top:7px; font-size:1rem; }
+.job-state { display:inline-flex; min-height:28px; align-items:center; padding:0 9px; border-radius:999px; background:#edf0ed; color:var(--ink-soft); font-size:.65rem; font-weight:850; white-space:nowrap; }
+.job-state.is-good { background:var(--teal-soft); color:#24675f; }
+.job-state.is-warning, .job-state.is-decision { background:var(--amber-soft); color:#80501f; }
+.sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+.dialog-error { margin:-5px 0 0; padding:10px 12px; border-left:3px solid var(--red); background:#fff0ed; color:var(--red); font-size:.75rem; line-height:1.4; }
+.job-result { margin:14px 0 0; color:var(--ink-soft); font-size:.78rem; }
+.editorial-timeline { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:7px; margin:18px 0 0; padding:0; list-style:none; }
+.timeline-stage { position:relative; min-width:0; min-height:75px; padding:10px 8px; border-top:2px solid var(--line); }
+.timeline-stage.is-running { border-color:var(--teal); background:#f1faf6; }
+.timeline-stage.is-completed { border-color:#8ec4b7; }
+.timeline-stage.is-blocked, .timeline-stage.is-failed { border-color:var(--amber); background:var(--amber-soft); }
+.timeline-marker { display:inline-block; width:8px; height:8px; margin-bottom:8px; border-radius:50%; background:var(--line-strong); }
+.timeline-stage.is-running .timeline-marker { background:var(--teal); }
+.timeline-stage.is-completed .timeline-marker { background:#55a99a; }
+.timeline-stage strong { display:block; font-size:.68rem; line-height:1.25; }
+.timeline-meta, .artifact-count { display:block; margin-top:4px; color:var(--ink-soft); font-size:.61rem; line-height:1.3; }
+.timeline-warning { margin:5px 0 0; color:#80501f; font-size:.61rem; line-height:1.3; }
+.decision-desk { display:grid; gap:14px; margin-top:18px; padding-top:16px; border-top:1px solid var(--line); }
+.decision-desk > div:first-child strong { display:block; margin-top:6px; font-size:1.1rem; }
+.decision-desk > div:first-child p { margin:6px 0 0; color:var(--ink-soft); font-size:.74rem; }
+.angle-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.angle-card { display:flex; min-width:0; flex-direction:column; align-items:flex-start; padding:14px; border:1px solid var(--line); border-radius:6px; background:#fbfcf9; }
+.angle-number, .evidence-count { color:var(--teal); font-size:.61rem; font-weight:850; letter-spacing:.08em; text-transform:uppercase; }
+.angle-card h3 { margin-top:8px; }
+.angle-card p { margin:8px 0 0; color:var(--ink-soft); font-size:.74rem; line-height:1.45; }
+.angle-card .angle-why { font-size:.68rem; }
+.angle-card .evidence-count { margin-top:10px; }
+.angle-card button { width:100%; margin-top:12px; }
+.review-summary { padding:14px; border:1px solid var(--line); border-radius:6px; background:#fbfcf9; }
+.review-summary h3 { font-size:1.25rem; }
+.review-summary p { margin:7px 0 0; color:var(--ink-soft); font-size:.78rem; line-height:1.5; }
+.review-metrics { display:flex; flex-wrap:wrap; gap:8px 18px; margin-top:12px; color:var(--ink-soft); font-size:.68rem; }
+.review-metrics b { color:var(--teal); }
+.review-actions { display:flex; justify-content:flex-end; gap:8px; }
+.compose-dialog { width:min(600px,calc(100vw - 32px)); max-width:100%; padding:0; border:0; border-radius:10px; background:var(--paper); color:var(--ink); box-shadow:0 24px 80px rgba(21,35,35,.24); }
+.compose-dialog::backdrop { background:rgba(22,32,38,.42); }
+.compose-dialog form { padding:24px; }
+.dialog-head { display:flex; justify-content:space-between; gap:20px; align-items:start; margin-bottom:24px; }
+.dialog-head h2 { font-size:2rem; }
+.icon-button { width:44px; padding:0; border-color:var(--line); background:var(--card); font-size:1.4rem; font-weight:400; }
+.compose-dialog fieldset { margin:0 0 20px; padding:0; border:0; }
+.compose-dialog legend, .field-label { display:block; margin-bottom:8px; color:var(--ink-soft); font-size:.68rem; font-weight:850; letter-spacing:.09em; text-transform:uppercase; }
+.choice-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.choice-card { display:flex; min-height:74px; align-items:flex-start; gap:10px; padding:12px; border:1px solid var(--line-strong); border-radius:6px; background:var(--card); cursor:pointer; }
+.choice-card:has(input:checked) { border-color:var(--teal); box-shadow:inset 0 0 0 1px var(--teal); }
+.choice-card input { margin-top:3px; accent-color:var(--teal); }
+.choice-card strong, .choice-card small, .toggle-row strong, .toggle-row small { display:block; }
+.choice-card strong, .toggle-row strong { font-size:.76rem; }
+.choice-card small, .toggle-row small { margin-top:4px; color:var(--ink-soft); font-size:.68rem; line-height:1.35; }
+.field-label span { font-weight:500; letter-spacing:0; text-transform:none; }
+.text-input { width:100%; margin-bottom:17px; padding:11px 12px; border:1px solid var(--line-strong); border-radius:5px; background:var(--card); color:var(--ink); font:inherit; font-size:.84rem; line-height:1.4; }
+textarea.text-input { resize:vertical; }
+.fixed-output { display:grid; gap:4px; margin:2px 0 15px; padding:13px; border-left:3px solid var(--teal); background:var(--teal-soft); }
+.fixed-output strong { font-size:.85rem; }
+.fixed-output > span:last-child { color:var(--ink-soft); font-size:.69rem; }
+.toggle-row { display:flex; gap:10px; align-items:flex-start; padding:12px 0; cursor:pointer; }
+.toggle-row input { width:18px; height:18px; margin:0; accent-color:var(--teal); }
+.dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
+.confirmation { display:grid; grid-template-columns:120px minmax(0,1fr); gap:0; margin:18px 0; }
+.confirmation dt, .confirmation dd { margin:0; padding:10px 0; border-bottom:1px solid var(--line); font-size:.75rem; overflow-wrap:anywhere; }
+.confirmation dt { color:var(--ink-soft); font-weight:800; }
+.confirmation dd { color:var(--ink); }
+.confirm-note { color:var(--ink-soft); font-size:.76rem; line-height:1.45; }
 .summary { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:10px; padding:24px clamp(24px,5vw,76px); border-bottom:1px solid var(--line); }
 .summary-card { display:flex; min-height:112px; flex-direction:column; justify-content:space-between; padding:15px 16px; border:1px solid var(--line); border-radius:7px; background:var(--card); box-shadow:var(--shadow); }
 .summary-card--accent { border-top:3px solid var(--teal); }
@@ -522,7 +923,6 @@ select { width:100%; padding:0 34px 0 12px; border:1px solid var(--line-strong);
 .radar-main h3 { font-size:1.16rem; }
 .radar-main > p { max-width:800px; margin:8px 0; color:var(--ink-soft); font-size:.81rem; line-height:1.5; }
 .safe-url { display:flex; min-height:44px; max-width:100%; align-items:center; margin-top:5px; padding:8px 0; color:var(--teal); font-size:.74rem; line-height:1.35; overflow-wrap:anywhere; text-decoration:underline; text-decoration-color:#a7d1c8; text-underline-offset:3px; }
-.safe-url:hover { text-decoration-color:currentColor; }
 .chips { display:flex; flex-wrap:wrap; gap:5px; margin-top:10px; }
 .chip { display:inline-flex; min-height:25px; align-items:center; padding:3px 7px; border:1px solid #b9d8d0; border-radius:999px; background:var(--teal-soft); color:#24675f; font-size:.62rem; font-weight:800; }
 .chip--warm { border-color:#e6c596; background:var(--amber-soft); color:#80501f; }
@@ -628,9 +1028,10 @@ summary::marker { color:var(--teal); }
 .empty-state span { color:var(--teal); font-size:1.6rem; }
 .empty-state p { margin:0; font-size:.8rem; }
 .footer { display:flex; justify-content:space-between; gap:16px; margin:24px clamp(24px,5vw,76px) 0; padding:19px 0 26px; border-top:1px solid var(--line); color:var(--ink-soft); font-size:.65rem; }
-@media (hover:none) { .section-nav a:hover, .safe-url:hover { text-decoration:none; background:transparent; } }
+@media (hover: hover) and (pointer: fine) { .section-nav a:hover { color:var(--ink); background:rgba(255,255,255,.56); } .safe-url:hover { text-decoration-color:currentColor; } }
 @media (max-width:900px) { .app-shell { grid-template-columns:168px minmax(0,1fr); } .topbar { gap:22px; } .topbar-controls { flex-basis:190px; } .source-layout, .formats-grid { grid-template-columns:1fr; } }
-@media (max-width:680px) { html { scroll-behavior:auto; } body { min-width:0; } .mobile-header { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; min-height:54px; padding:0 16px; border-bottom:1px solid var(--line); background:rgba(244,244,240,.97); } .sidebar { position:sticky; top:54px; z-index:9; display:block; width:100%; height:auto; padding:0; border-right:0; border-bottom:1px solid var(--line); } .brand-block, .sidebar-foot { display:none; } .app-shell { display:block; } .section-nav { display:flex; gap:3px; margin:0; padding:5px 12px; overflow-x:auto; overscroll-behavior-inline:contain; scrollbar-width:none; } .section-nav::-webkit-scrollbar { display:none; } .section-nav a { flex:0 0 auto; min-height:44px; padding:0 11px; border-left:0; border-bottom:2px solid transparent; white-space:nowrap; } .section-nav a:hover { background:transparent; } .topbar { display:block; padding:28px 16px 22px; } .topbar-copy h1 { font-size:2.5rem; } .topbar-controls { margin-top:23px; } .summary { grid-template-columns:repeat(2,minmax(0,1fr)); padding:14px 16px; } .summary-card { min-height:96px; padding:12px; } .summary-card strong { font-size:1rem; } .warnings { margin:14px 16px 0; } .section { scroll-margin-top:112px; padding:43px 16px 0; } .section-heading { display:block; margin-bottom:17px; } .section-note { margin-top:12px; } .radar-item { grid-template-columns:27px minmax(0,1fr) 48px; gap:8px; } .radar-score strong { font-size:1.7rem; } .score-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .detail-columns, .claim-columns, .qa-grid, .source-overview { grid-template-columns:1fr; } .source-card { grid-template-columns:27px minmax(0,1fr); padding:14px; } .qa-canonical { display:block; } .qa-canonical dl { margin-top:20px; justify-content:space-between; } .markdown-card { padding:20px 17px; } .prose { font-size:1rem; } .format-panel { padding:17px; } .evidence summary { display:flex; flex-wrap:wrap; gap:6px 10px; } .evidence summary > span:first-child { flex:1 1 100%; } .evidence summary > b { margin-left:auto; } .footer { display:block; margin:24px 16px 0; } .footer span { display:block; margin-top:5px; } }
+@media (max-width:680px) { html { scroll-behavior:auto; } body { min-width:0; } .mobile-header { position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between; min-height:calc(54px + env(safe-area-inset-top)); padding:env(safe-area-inset-top) 16px 0; border-bottom:1px solid var(--line); background:rgba(244,244,240,.97); } .sidebar { position:sticky; top:calc(54px + env(safe-area-inset-top)); z-index:9; display:block; width:100%; height:auto; padding:0; border-right:0; border-bottom:1px solid var(--line); } .brand-block, .sidebar-foot { display:none; } .app-shell { display:block; } .section-nav { display:flex; gap:3px; margin:0; padding:5px 12px; overflow-x:auto; overscroll-behavior-inline:contain; scrollbar-width:none; } .section-nav::-webkit-scrollbar { display:none; } .section-nav a { flex:0 0 auto; min-height:44px; padding:0 11px; border-left:0; border-bottom:2px solid transparent; white-space:nowrap; } .topbar { display:block; padding:28px 16px 22px; } .topbar-copy h1 { font-size:2.5rem; } .topbar-controls { margin-top:23px; } .summary { grid-template-columns:repeat(2,minmax(0,1fr)); padding:14px 16px; } .summary-card { min-height:96px; padding:12px; } .summary-card strong { font-size:1rem; } .warnings { margin:14px 16px 0; } .section { scroll-margin-top:calc(112px + env(safe-area-inset-top)); padding:43px 16px 0; } .section-heading { display:block; margin-bottom:17px; } .section-note { margin-top:12px; } .radar-item { grid-template-columns:27px minmax(0,1fr) 48px; gap:8px; } .radar-score strong { font-size:1.7rem; } .score-grid { grid-template-columns:repeat(2,minmax(0,1fr)); } .detail-columns, .claim-columns, .qa-grid, .source-overview { grid-template-columns:1fr; } .source-card { grid-template-columns:27px minmax(0,1fr); padding:14px; } .qa-canonical { display:block; } .qa-canonical dl { margin-top:20px; justify-content:space-between; } .markdown-card { padding:20px 17px; } .prose { font-size:1rem; } .format-panel { padding:17px; } .evidence summary { display:flex; flex-wrap:wrap; gap:6px 10px; } .evidence summary > span:first-child { flex:1 1 100%; } .evidence summary > b { margin-left:auto; } .footer { display:block; margin:24px 16px 0; } .footer span { display:block; margin-top:5px; } }
+@media (max-width:680px) { .control-plane { margin:14px 16px 0; padding:16px; } .control-plane-heading { display:block; } .control-plane-actions { display:grid; grid-template-columns:1fr; gap:8px; margin-top:18px; } .control-status { justify-content:center; } .editorial-timeline { grid-template-columns:1fr; gap:0; margin-top:14px; } .timeline-stage { min-height:0; padding:10px 10px 10px 23px; border-top:0; border-left:2px solid var(--line); } .timeline-stage.is-running, .timeline-stage.is-completed, .timeline-stage.is-blocked, .timeline-stage.is-failed { border-left-color:var(--teal); border-top:0; } .timeline-marker { position:absolute; top:14px; left:-5px; margin:0; } .angle-cards { grid-template-columns:1fr; } .review-actions { position:sticky; bottom:0; z-index:4; margin:0 -16px; padding:10px 16px calc(10px + env(safe-area-inset-bottom)); background:rgba(244,244,240,.97); border-top:1px solid var(--line); } .review-actions button { flex:1; } .compose-dialog { width:100%; max-width:none; height:100dvh; max-height:none; margin:0; border-radius:0; } .compose-dialog form { display:flex; min-height:100%; flex-direction:column; padding:18px 16px; } .compose-step { flex:1; } .dialog-actions { position:sticky; bottom:0; margin-inline:-16px; padding:12px 16px calc(12px + env(safe-area-inset-bottom)); background:rgba(244,244,240,.98); border-top:1px solid var(--line); } .dialog-actions button { flex:1; } }
 @media (prefers-reduced-motion:reduce) { *, *::before, *::after { scroll-behavior:auto !important; transition-duration:0.01ms !important; animation-duration:0.01ms !important; } }
 `;
 }
