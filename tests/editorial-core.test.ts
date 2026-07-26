@@ -7,7 +7,7 @@ import { z } from "zod";
 import { createJobStore } from "../src/storage/job-store.js";
 import { loadCockpitModel } from "../src/cockpit/adapter.js";
 import { createDeepSeekClient, DeepSeekRequestError, type DeepSeekClient } from "../src/providers/deepseek.js";
-import { runFirecrawlAgent } from "../src/providers/firecrawl.js";
+import { FIRECRAWL_AGENT_POLL_TIMEOUT_MS, FirecrawlAgentTimeoutError, runFirecrawlAgent } from "../src/providers/firecrawl.js";
 import { EditorialJobInputSchema, assertEditorialJobTransition } from "../src/schemas/editorial-job.js";
 import { createDeepSeekGeneration, createEditorialRunner, createFirecrawlCollector, MAX_PRODUCTION_ANCHOR_TEXT_BYTES, MAX_PRODUCTION_DISCOVERY_SOURCES, MAX_PRODUCTION_SOURCE_TEXT_BYTES } from "../src/editorial/run-editorial-job.js";
 import { createPackageWriter } from "../src/editorial/package-writer.js";
@@ -188,6 +188,44 @@ describe("mocked runner", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("logs a sanitized server-side cause while keeping the persisted failure generic", async () => {
+    const root = await tempName("editorial-observability-");
+    try {
+      const messages: string[] = [];
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      const runner = createEditorialRunner({
+        store,
+        collector: {
+          collect: async () => {
+            throw new Error("Firecrawl discovery failed Authorization: Bearer sk-super-secret-token api_key=top-secret /home/vitor/private.log");
+          },
+        },
+        generation: {
+          research: async () => generation().research,
+          angles: async () => generation().angles,
+          diagnosis: async () => generation().diagnosis,
+          draft: async () => generation().draft,
+          formats: async () => generation().formats,
+        },
+        packageWriter: createPackageWriter(root),
+        logger: { error: (message) => messages.push(String(message)) },
+      });
+      const failed = await runner.start(input);
+      assert.equal(failed.state, "failed");
+      assert.deepEqual(failed.error, { code: "unknown", stage: "researching", message: "Editorial stage failed" });
+      assert.equal(messages.length, 1);
+      const diagnosticEvents = (await store.events(failed.id)).filter((event) => event.type === "error" && event.message.startsWith("Editorial runner failure"));
+      assert.equal(diagnosticEvents.length, 1);
+      for (const diagnostic of [messages[0]!, diagnosticEvents[0]!.message]) {
+        assert.match(diagnostic, /^Editorial runner failure job=job_[a-f0-9-]+ stage=researching code=unknown cause=Error: Firecrawl discovery failed/u);
+        assert.match(diagnostic, /\[conteúdo omitido\]/u);
+        assert.match(diagnostic, /\[caminho omitido\]/u);
+        assert.doesNotMatch(diagnostic, /super-secret|top-secret|\/home\/vitor/u);
+      }
+      assert.ok(messages[0]!.length <= 1_500);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("blocks diagnosis at the deterministic source gate", async () => {
     const root = await tempName("editorial-gate-");
     try {
@@ -349,6 +387,26 @@ describe("production Firecrawl collector", () => {
       controller.abort();
       await assert.rejects(pending, /cancelled|aborted/iu);
       assert.equal(pollRequests, 0);
+    } finally { globalThis.fetch = originalFetch; }
+  });
+
+  it("allows five minutes by default and classifies an exhausted Agent deadline as provider_timeout", async () => {
+    assert.equal(FIRECRAWL_AGENT_POLL_TIMEOUT_MS, 300_000);
+    const originalFetch = globalThis.fetch;
+    let pollRequests = 0;
+    globalThis.fetch = (async (url: string | URL | Request) => {
+      if (String(url).endsWith("/agent")) return Response.json({ success: true, id: "agent-job" });
+      pollRequests += 1;
+      return Response.json({ success: true, status: "running" });
+    }) as typeof fetch;
+    try {
+      await assert.rejects(
+        runFirecrawlAgent({ prompt: "fixed", schema: {}, pollIntervalMs: 1, pollTimeoutMs: 25 }, { apiKey: "local-test", baseUrl: "https://local.invalid/v2" }),
+        (error: unknown) => error instanceof FirecrawlAgentTimeoutError
+          && error.code === "provider_timeout"
+          && error.jobId === "agent-job",
+      );
+      assert.ok(pollRequests > 0);
     } finally { globalThis.fetch = originalFetch; }
   });
 

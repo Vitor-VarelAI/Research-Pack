@@ -126,7 +126,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}): ControlPl
 
   function getRunner(): EditorialRunner {
     if (!runnerReady) throw new ControlPlaneError(503, "runner_not_configured");
-    if (!runner) runner = createProductionEditorialRunner(dataDir, environment);
+    if (!runner) runner = createProductionEditorialRunner(dataDir, environment, logger);
     return runner;
   }
 

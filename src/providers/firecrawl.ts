@@ -86,6 +86,17 @@ type FirecrawlConfig = {
   maxResponseBytes: number;
 };
 
+export const FIRECRAWL_AGENT_POLL_TIMEOUT_MS = 300_000;
+
+export class FirecrawlAgentTimeoutError extends Error {
+  readonly code = "provider_timeout";
+
+  constructor(readonly jobId: string) {
+    super(`Firecrawl agent timed out waiting for job ${jobId}`);
+    this.name = "FirecrawlAgentTimeoutError";
+  }
+}
+
 export type FirecrawlAgentOptions = {
   prompt: string;
   urls?: string[];
@@ -436,7 +447,7 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
     apiKey,
     baseUrl: config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2",
     pollIntervalMs: config?.pollIntervalMs ?? 2_000,
-    pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
+    pollTimeoutMs: config?.pollTimeoutMs ?? FIRECRAWL_AGENT_POLL_TIMEOUT_MS,
     maxResponseBytes: config?.maxResponseBytes ?? 2_000_000,
   };
 
@@ -496,7 +507,7 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
     if (status.status === "failed" || status.status === "cancelled") throw new Error(`Firecrawl agent ${status.status}`);
   }
 
-  throw new Error(`Firecrawl agent timed out waiting for job ${parsed.id}`);
+  throw new FirecrawlAgentTimeoutError(parsed.id);
 }
 
 async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {

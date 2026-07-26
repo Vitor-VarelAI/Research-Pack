@@ -8,6 +8,7 @@ import {
   EditorialJobInputSchema,
   type EditorialJob,
   type EditorialJobInput,
+  redactSensitiveText,
   type EditorialJobStage,
   type EditorialSafeErrorCode,
   type EditorialStageSummary,
@@ -63,6 +64,7 @@ export type EditorialRunnerOptions = {
   collector: EditorialCollector;
   generation: EditorialGeneration;
   packageWriter: PackageWriter;
+  logger?: Pick<Console, "error">;
 };
 
 export type EditorialRunner = {
@@ -79,6 +81,7 @@ export type EditorialRunner = {
 type Execution = { token: string; controller: AbortController };
 
 export function createEditorialRunner(options: EditorialRunnerOptions): EditorialRunner {
+  const logger = options.logger ?? console;
   const executions = new Map<string, Execution>();
   const cancellations = new Map<string, Promise<EditorialJob>>();
   const mutationTails = new Map<string, Promise<unknown>>();
@@ -374,6 +377,9 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
       throw error;
     }
     const safe = toSafeError(error, stage);
+    const diagnostic = formatEditorialRunnerFailure(jobId, stage, safe.code, error);
+    logger.error(diagnostic);
+    await options.store.appendEvent(jobId, { state: current.state, type: "error", message: diagnostic }).catch(() => undefined);
     if (current.state === stage) return options.store.transition(jobId, "failed", { error: safe, failedStage: stage }, { revision: current.revision, state: stage });
     throw error;
   }
@@ -431,7 +437,11 @@ export function inspectProductionEditorialRunnerReadiness(environment: NodeJS.Pr
   return { ready: unavailableVariables.length === 0, unavailableVariables };
 }
 
-export function createProductionEditorialRunner(dataRoot = process.env.SCRAPE_AGENT_DATA_DIR ?? "data", environment: NodeJS.ProcessEnv = process.env): EditorialRunner {
+export function createProductionEditorialRunner(
+  dataRoot = process.env.SCRAPE_AGENT_DATA_DIR ?? "data",
+  environment: NodeJS.ProcessEnv = process.env,
+  logger: Pick<Console, "error"> = console,
+): EditorialRunner {
   let resolved: EditorialRunner | undefined;
   const getRunner = (): EditorialRunner => {
     if (!resolved) {
@@ -453,6 +463,7 @@ export function createProductionEditorialRunner(dataRoot = process.env.SCRAPE_AG
         collector: createProductionFirecrawlCollector(firecrawl, (options) => runFirecrawlAgent(options, firecrawlConfig)),
         generation: createDeepSeekGeneration(deepseek),
         packageWriter: createPackageWriter(dataRoot),
+        logger,
       });
     }
     return resolved;
@@ -789,4 +800,18 @@ function toSafeError(error: unknown, stage: EditorialJobStage): { code: Editoria
     unknown: "Editorial stage failed",
   };
   return { code, stage, message: messages[code] };
+}
+
+function formatEditorialRunnerFailure(jobId: string, stage: EditorialJobStage, code: EditorialSafeErrorCode, error: unknown): string {
+  const candidate = error as { message?: unknown; name?: unknown; status?: unknown };
+  const name = typeof candidate?.name === "string" && candidate.name.trim() ? candidate.name.trim() : "Error";
+  const message = typeof candidate?.message === "string" && candidate.message.trim()
+    ? candidate.message.trim()
+    : typeof error === "string" && error.trim()
+      ? error.trim()
+      : "Non-Error rejection";
+  const status = typeof candidate?.status === "number" && Number.isFinite(candidate.status)
+    ? ` status=${candidate.status}`
+    : "";
+  return redactSensitiveText(`Editorial runner failure job=${jobId} stage=${stage} code=${code}${status} cause=${name}: ${message}`, 1_500);
 }

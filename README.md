@@ -34,6 +34,8 @@ npm run export:html -- /absolute/path/to/editorial-package
 
 The cockpit is a private editorial operations desk over existing artifacts and the fixed control-plane API. Actions remain disabled by default; set `SCRAPE_AGENT_COCKPIT_ACTIONS=1` and the exact server-only `SCRAPE_AGENT_COCKPIT_ORIGIN` only after local validation. The runner accepts a validated URL or topic, uses bounded Firecrawl discovery and direct DeepSeek generation, and never accepts shell, provider, model, prompt, executable or path options from the browser. The UI advertises actions only when `FIRECRAWL_API_KEY`, `DEEPSEEK_API_KEY`, a valid HTTP(S) `DEEPSEEK_BASE_URL`, and `DEEPSEEK_MODEL` are present in the service environment. This readiness check is local: it creates no provider clients and makes no network requests. Read-only browsing remains available when provider configuration is absent or invalid. The default data root is `data/`; point it at an existing runtime data directory with `SCRAPE_AGENT_DATA_DIR`.
 
+Firecrawl Agent discovery polls every two seconds with a five-minute local deadline. The deadline bounds a cockpit run; it is not a claim that the remote Firecrawl job has stopped. An exhausted deadline is stored as the recoverable code `provider_timeout`, while the UI keeps the public message generic. The runner writes a bounded, sanitised diagnostic to the job's `events.jsonl`, including the remote job ID when Firecrawl supplied one, so operators can identify the failed provider stage without exposing credentials. Retrying may create another paid provider job because V1 does not resume the earlier remote Firecrawl job.
+
 ```bash
 SCRAPE_AGENT_DATA_DIR=/home/vitor/projects/scrape-agent/data npm run cockpit
 # opens http://127.0.0.1:4173
@@ -66,6 +68,12 @@ Keep the cockpit on `127.0.0.1:4173`; Tailscale Serve is the only remote boundar
 It accepts only `GET` and `HEAD`, keeps package and artifact paths contained under the configured root, rejects symlink escapes, and degrades individual missing or malformed artifacts into visible warnings. The radar shown in the cockpit is the latest valid global `radar-hn` run because the append-only run record has no package foreign key. It binds to `127.0.0.1` by default; a non-loopback `SCRAPE_AGENT_HOST` requires the explicitly named `SCRAPE_AGENT_ALLOW_UNSAFE_HOST=1` opt-in and emits a startup warning. Artifact reads use `O_NOFOLLOW` and the opened descriptor's `fstat`, but Node has no portable `openat` API, so a concurrent replacement of an intermediate directory remains a residual TOCTOU limitation.
 
 Run the focused cockpit tests with `npm run test:cockpit`; the full suite remains `npm test`.
+
+For a failed editorial job, inspect its sanitised diagnostic history locally:
+
+```bash
+jq -c 'select(.type == "error")' data/control/jobs/<job-id>/events.jsonl
+```
 
 ## Editorial HTML export
 
