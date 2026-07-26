@@ -299,13 +299,13 @@ describe("mocked runner", () => {
 });
 
 describe("production Firecrawl collector", () => {
-  function document(url: string, markdown: string): ScrapedDocument {
+  function document(url: string, markdown: string, links: string[] = []): ScrapedDocument {
     return {
       id: `doc-${url}`,
       url,
       title: `Title ${url}`,
       markdown,
-      links: [],
+      links,
       metadata: {},
       fetchedAt: "2026-03-01T00:00:00.000Z",
       provider: "mock-firecrawl",
@@ -313,7 +313,7 @@ describe("production Firecrawl collector", () => {
     };
   }
 
-  it("uses one fixed bounded discovery for URL and topic, then fresh-scrapes only safe canonical URLs", async () => {
+  it("scrapes URL inputs directly, reserves Agent discovery for topics, and keeps anchors bounded and public", async () => {
     const scraped: string[] = [];
     const discoveryRequests: unknown[] = [];
     const provider: CrawlProvider = {
@@ -322,7 +322,13 @@ describe("production Firecrawl collector", () => {
       scrape: async (url, options) => {
         assert.equal(options?.maxAgeMs, 0);
         scraped.push(url);
-        return document(url, "x".repeat(MAX_PRODUCTION_ANCHOR_TEXT_BYTES + 1));
+        return document(
+          url,
+          "x".repeat(MAX_PRODUCTION_ANCHOR_TEXT_BYTES + 1),
+          url === "https://seed.example/article"
+            ? discovered
+            : [],
+        );
       },
     };
     const discovered = [
@@ -342,7 +348,7 @@ describe("production Firecrawl collector", () => {
     };
     const collector = createFirecrawlCollector(provider, discover);
     const urlResult = await collector.collect({ kind: "url", url: "https://seed.example/article/", context: "ctx", output: "blog-formats", exportHtml: false }, new AbortController().signal);
-    assert.equal(discoveryRequests.length, 1);
+    assert.equal(discoveryRequests.length, 0);
     assert.ok(scraped.length <= MAX_PRODUCTION_DISCOVERY_SOURCES);
     assert.equal(scraped[0], "https://seed.example/article");
     assert.equal(new Set(scraped).size, scraped.length);
@@ -353,6 +359,7 @@ describe("production Firecrawl collector", () => {
 
     scraped.length = 0;
     const topicResult = await collector.collect({ kind: "topic", topic: "bounded topic", context: "ctx", output: "blog-formats", exportHtml: false }, new AbortController().signal);
+    assert.equal(discoveryRequests.length, 1);
     assert.ok(scraped.length >= 3 && scraped.length <= MAX_PRODUCTION_DISCOVERY_SOURCES);
     assert.equal(topicResult.anchors.length, scraped.length);
   });

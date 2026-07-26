@@ -500,7 +500,7 @@ const ProductionDiscoverySchema = WebResearchExtractionSchema.extend({
 }).strict();
 
 const ProductionDiscoveryJsonSchema = stripJsonSchemaMeta(z.toJSONSchema(ProductionDiscoverySchema));
-const PRODUCTION_DISCOVERY_PROMPT = "Use the supplied topic or seed URL to find useful independent web sources. Return only the existing web-research JSON contract. For a URL, include the seed URL and seek independent anchors; for a topic, seek three to six useful sources. Return HTTP(S) URLs only, never credentials or private targets, and do not invent URLs.";
+const PRODUCTION_DISCOVERY_PROMPT = "Find three to six useful independent web sources for the supplied topic. Return only the existing web-research JSON contract. Return HTTP(S) URLs only, never credentials or private targets, and do not invent URLs.";
 
 export function createProductionFirecrawlCollector(provider: CrawlProvider, discover: FirecrawlDiscovery = runFirecrawlAgent, resolveHost?: PublicHostResolver): EditorialCollector {
   return createFirecrawlCollector(provider, discover, resolveHost ?? systemPublicHostResolver);
@@ -512,17 +512,25 @@ export function createFirecrawlCollector(provider: CrawlProvider, discover: Fire
       const input = EditorialJobInputSchema.parse(rawInput);
       throwIfAborted(signal);
       if (resolveHost && input.kind === "url") await assertPublicHttpUrl(input.url, resolveHost);
-      const discoveryInput = input.kind === "url" ? [input.url] : undefined;
-      const result = await discover({
-        prompt: `${PRODUCTION_DISCOVERY_PROMPT}\n${delimit("input", input.kind === "topic" ? input.topic : input.url)}\n${delimit("context", input.context)}`,
-        ...(discoveryInput ? { urls: discoveryInput } : {}),
-        schema: ProductionDiscoveryJsonSchema,
-        model: "spark-1-mini",
-        signal,
-      });
-      throwIfAborted(signal);
-      const discovery = parseBoundedDiscovery(result.data);
-      const candidates = canonicalDiscoveryUrls(input, discovery.sources);
+      let seed: { url: string; document: ScrapedDocument } | undefined;
+      let discoveredSources: string[];
+      if (input.kind === "url") {
+        const url = canonicalEditorialUrl(input.url);
+        const document = await provider.scrape(url, { maxAgeMs: 0, signal });
+        throwIfAborted(signal);
+        seed = { url, document };
+        discoveredSources = document.links;
+      } else {
+        const result = await discover({
+          prompt: `${PRODUCTION_DISCOVERY_PROMPT}\n${delimit("topic", input.topic)}\n${delimit("context", input.context)}`,
+          schema: ProductionDiscoveryJsonSchema,
+          model: "spark-1-mini",
+          signal,
+        });
+        throwIfAborted(signal);
+        discoveredSources = parseBoundedDiscovery(result.data).sources;
+      }
+      const candidates = canonicalDiscoveryUrls(input, discoveredSources);
       const publicCandidates: string[] = [];
       for (const url of candidates) {
         throwIfAborted(signal);
@@ -530,11 +538,12 @@ export function createFirecrawlCollector(provider: CrawlProvider, discover: Fire
           if (resolveHost) await assertPublicHttpUrl(url, resolveHost);
           publicCandidates.push(url);
         } catch (error) {
-          if (input.kind === "url" && url === input.url) throw error;
+          if (seed && url === seed.url) throw error;
         }
       }
-      const scraped: Array<{ url: string; document: ScrapedDocument }> = [];
+      const scraped: Array<{ url: string; document: ScrapedDocument }> = seed ? [seed] : [];
       for (const url of publicCandidates) {
+        if (seed && url === seed.url) continue;
         throwIfAborted(signal);
         try {
           const document = await provider.scrape(url, { maxAgeMs: 0, signal });
