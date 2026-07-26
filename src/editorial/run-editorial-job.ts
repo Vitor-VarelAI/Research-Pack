@@ -410,17 +410,47 @@ export async function runEditorialJob(input: EditorialJobInput, callbacks: Edito
   return createEditorialRunner(callbacks).start(input);
 }
 
-export function createProductionEditorialRunner(dataRoot = process.env.SCRAPE_AGENT_DATA_DIR ?? "data"): EditorialRunner {
+const PRODUCTION_PROVIDER_VARIABLES = ["FIRECRAWL_API_KEY", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"] as const;
+export type ProductionProviderVariable = typeof PRODUCTION_PROVIDER_VARIABLES[number] | "FIRECRAWL_BASE_URL";
+export type ProductionEditorialRunnerReadiness = {
+  ready: boolean;
+  unavailableVariables: ProductionProviderVariable[];
+};
+
+/** Validate local production configuration without constructing clients or contacting providers. */
+export function inspectProductionEditorialRunnerReadiness(environment: NodeJS.ProcessEnv = process.env): ProductionEditorialRunnerReadiness {
+  const unavailable = new Set<ProductionProviderVariable>();
+  if (!environment.FIRECRAWL_API_KEY?.trim()) unavailable.add("FIRECRAWL_API_KEY");
+  const firecrawlBaseUrl = environment.FIRECRAWL_BASE_URL?.trim();
+  if (firecrawlBaseUrl && !isHttpProviderUrl(firecrawlBaseUrl)) unavailable.add("FIRECRAWL_BASE_URL");
+  if (!environment.DEEPSEEK_API_KEY?.trim()) unavailable.add("DEEPSEEK_API_KEY");
+  if (!isHttpProviderUrl(environment.DEEPSEEK_BASE_URL)) unavailable.add("DEEPSEEK_BASE_URL");
+  if (!environment.DEEPSEEK_MODEL?.trim()) unavailable.add("DEEPSEEK_MODEL");
+  const unavailableVariables: ProductionProviderVariable[] = PRODUCTION_PROVIDER_VARIABLES.filter((name) => unavailable.has(name));
+  if (unavailable.has("FIRECRAWL_BASE_URL")) unavailableVariables.push("FIRECRAWL_BASE_URL");
+  return { ready: unavailableVariables.length === 0, unavailableVariables };
+}
+
+export function createProductionEditorialRunner(dataRoot = process.env.SCRAPE_AGENT_DATA_DIR ?? "data", environment: NodeJS.ProcessEnv = process.env): EditorialRunner {
   let resolved: EditorialRunner | undefined;
   const getRunner = (): EditorialRunner => {
     if (!resolved) {
-      // Provider configuration is intentionally resolved on the first action,
-      // so a read-only cockpit can start without paid-provider credentials.
-      const deepseek = createDeepSeekClient(resolveDeepSeekConfig());
-      const firecrawl = createFirecrawlProvider();
+      // Configuration is resolved on the first action, while cockpit readiness
+      // uses the matching local-only inspection above.
+      const readiness = inspectProductionEditorialRunnerReadiness(environment);
+      if (!readiness.ready) throw new Error(`Missing or invalid provider configuration: ${readiness.unavailableVariables.join(", ")}`);
+      const firecrawlApiKey = environment.FIRECRAWL_API_KEY?.trim();
+      if (!firecrawlApiKey) throw new Error("Missing FIRECRAWL_API_KEY");
+      const deepseek = createDeepSeekClient(resolveDeepSeekConfig(environment));
+      const firecrawlBaseUrl = environment.FIRECRAWL_BASE_URL?.trim();
+      const firecrawlConfig = {
+        apiKey: firecrawlApiKey,
+        ...(firecrawlBaseUrl ? { baseUrl: firecrawlBaseUrl } : {}),
+      };
+      const firecrawl = createFirecrawlProvider(firecrawlConfig);
       resolved = createEditorialRunner({
         store: createJobStore(dataRoot),
-        collector: createProductionFirecrawlCollector(firecrawl),
+        collector: createProductionFirecrawlCollector(firecrawl, (options) => runFirecrawlAgent(options, firecrawlConfig)),
         generation: createDeepSeekGeneration(deepseek),
         packageWriter: createPackageWriter(dataRoot),
       });
@@ -436,6 +466,16 @@ export function createProductionEditorialRunner(dataRoot = process.env.SCRAPE_AG
     cancel: (jobId) => getRunner().cancel(jobId),
     retry: (jobId) => getRunner().retry(jobId),
   };
+}
+
+function isHttpProviderUrl(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export type FirecrawlDiscovery = (options: FirecrawlAgentOptions) => Promise<FirecrawlAgentResult>;

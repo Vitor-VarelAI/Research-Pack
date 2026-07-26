@@ -6,8 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createCockpitServer } from "../src/cockpit/server.js";
 import { toSafeJob } from "../src/cockpit/control-plane.js";
+import { inspectProductionEditorialRunnerReadiness, type EditorialRunner } from "../src/editorial/run-editorial-job.js";
 import { createJobStore, type JobStore } from "../src/storage/job-store.js";
-import type { EditorialRunner } from "../src/editorial/run-editorial-job.js";
 import type { EditorialJobInput } from "../src/schemas/editorial-job.js";
 
 const input: EditorialJobInput = { kind: "topic", topic: "Tema local", context: "", output: "blog-formats", exportHtml: false };
@@ -85,7 +85,106 @@ test("read-only cockpit starts without provider credentials and exposes only saf
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("mutations require exact JSON, origin, fetch site and CSRF, then return a background job", async () => {
+test("production readiness checks every required provider setting without network access", () => {
+  const missing = inspectProductionEditorialRunnerReadiness({});
+  assert.equal(missing.ready, false);
+  assert.deepEqual(missing.unavailableVariables, ["FIRECRAWL_API_KEY", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DEEPSEEK_MODEL"]);
+
+  const invalidUrl = inspectProductionEditorialRunnerReadiness({
+    FIRECRAWL_API_KEY: "firecrawl-test-value",
+    DEEPSEEK_API_KEY: "deepseek-test-value",
+    DEEPSEEK_BASE_URL: "not-a-url",
+    DEEPSEEK_MODEL: "test-model",
+  });
+  assert.equal(invalidUrl.ready, false);
+  assert.deepEqual(invalidUrl.unavailableVariables, ["DEEPSEEK_BASE_URL"]);
+
+  const invalidOptionalUrl = inspectProductionEditorialRunnerReadiness({
+    FIRECRAWL_API_KEY: "firecrawl-test-value",
+    FIRECRAWL_BASE_URL: "file:///tmp/provider",
+    DEEPSEEK_API_KEY: "deepseek-test-value",
+    DEEPSEEK_BASE_URL: "https://provider.invalid/v1",
+    DEEPSEEK_MODEL: "test-model",
+  });
+  assert.equal(invalidOptionalUrl.ready, false);
+  assert.deepEqual(invalidOptionalUrl.unavailableVariables, ["FIRECRAWL_BASE_URL"]);
+
+  const ready = inspectProductionEditorialRunnerReadiness({
+    FIRECRAWL_API_KEY: "firecrawl-test-value",
+    DEEPSEEK_API_KEY: "deepseek-test-value",
+    DEEPSEEK_BASE_URL: "https://provider.invalid/v1",
+    DEEPSEEK_MODEL: "test-model",
+  });
+  assert.deepEqual(ready, { ready: true, unavailableVariables: [] });
+});
+
+test("requested actions stay unavailable when production providers are not configured", async () => {
+  const root = await tempRoot();
+  const store = createJobStore({ rootDir: join(root, "control", "jobs") });
+  const messages: string[] = [];
+  const environment = { FIRECRAWL_API_KEY: "firecrawl-secret-sentinel" };
+  try {
+    await withServer({
+      dataDir: root,
+      store,
+      actionsEnabled: true,
+      origin: "http://cockpit.test",
+      environment,
+      logger: { error: (message) => messages.push(message) },
+    }, async (port) => {
+      const page = await requestJson(port, "GET", "/");
+      const token = page.body.match(/name="csrf-token" content="([^"]+)"/u)?.[1] ?? "";
+      assert.equal(page.status, 200);
+      assert.match(page.body, /data-actions-enabled="true" data-runner-ready="false"/u);
+      assert.match(page.body, /id="control-status"[^>]*><span[^>]*><\/span>Configuração necessária<\/span>/u);
+      assert.match(page.body, /id="new-content"[^>]*disabled/u);
+
+      const list = await requestJson(port, "GET", "/api/jobs");
+      assert.deepEqual(list.json, { jobs: [], actionsEnabled: true, runnerReady: false });
+
+      const result = await requestJson(port, "POST", "/api/jobs", input, {
+        "Sec-Fetch-Site": "same-origin",
+        Origin: "http://cockpit.test",
+        "X-CSRF-Token": token,
+      });
+      assert.equal(result.status, 503);
+      assert.deepEqual(result.json, { error: { code: "runner_not_configured", message: "O runner editorial ainda não está configurado no serviço." } });
+      assert.deepEqual(await store.list(), []);
+      assert.equal(messages.length, 1);
+      assert.match(messages[0]!, /DEEPSEEK_API_KEY/u);
+      assert.match(messages[0]!, /DEEPSEEK_BASE_URL/u);
+      assert.match(messages[0]!, /DEEPSEEK_MODEL/u);
+      assert.doesNotMatch(messages[0]!, /firecrawl-secret-sentinel/u);
+      assert.doesNotMatch(JSON.stringify(result.json), /firecrawl-secret-sentinel/u);
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("complete production configuration advertises actions without calling providers", async () => {
+  const root = await tempRoot();
+  try {
+    await withServer({
+      dataDir: root,
+      actionsEnabled: true,
+      origin: "http://cockpit.test",
+      environment: {
+        FIRECRAWL_API_KEY: "firecrawl-test-value",
+        DEEPSEEK_API_KEY: "deepseek-test-value",
+        DEEPSEEK_BASE_URL: "https://provider.invalid/v1",
+        DEEPSEEK_MODEL: "test-model",
+      },
+    }, async (port) => {
+      const page = await requestJson(port, "GET", "/");
+      assert.equal(page.status, 200);
+      assert.match(page.body, /Ações disponíveis/u);
+      assert.doesNotMatch(page.body, /id="new-content"[^>]*disabled/u);
+      const list = await requestJson(port, "GET", "/api/jobs");
+      assert.deepEqual(list.json, { jobs: [], actionsEnabled: true, runnerReady: true });
+    });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("mutations require exact JSON, origin, fetch site and CSRF, then accept topic and URL jobs with an injected runner", async () => {
   const root = await tempRoot();
   const store = createJobStore({ rootDir: join(root, "control", "jobs") });
   try {
@@ -98,9 +197,14 @@ test("mutations require exact JSON, origin, fetch site and CSRF, then return a b
       assert.equal(missingOrigin.status, 403);
       const malformed = await requestJson(port, "POST", "/api/jobs", { ...input, command: "ls" }, base);
       assert.equal(malformed.status, 400);
+      const initialList = await requestJson(port, "GET", "/api/jobs");
+      assert.equal(initialList.json.actionsEnabled, true);
+      assert.equal(initialList.json.runnerReady, true);
+      assert.match(page.body, /Ações disponíveis/u);
       const created = await requestJson(port, "POST", "/api/jobs", input, base);
       assert.equal(created.status, 202);
       assert.equal(created.json.job.state, "queued");
+      assert.deepEqual(created.json.job.input, input);
       assert.equal(created.json.job.angles.length, 0);
       assert.equal(created.json.job.review, null);
       const second = await requestJson(port, "POST", "/api/jobs", input, base);
@@ -110,9 +214,13 @@ test("mutations require exact JSON, origin, fetch site and CSRF, then return a b
       const cancelled = await requestJson(port, "POST", `/api/jobs/${created.json.job.id}/cancel`, {}, base);
       assert.equal(cancelled.status, 202);
       assert.equal(cancelled.json.job.state, "cancelled");
+      const urlInput: EditorialJobInput = { kind: "url", url: "https://example.com/source", context: "Contexto local", output: "blog-formats", exportHtml: true };
+      const createdFromUrl = await requestJson(port, "POST", "/api/jobs", urlInput, base);
+      assert.equal(createdFromUrl.status, 202);
+      assert.deepEqual(createdFromUrl.json.job.input, urlInput);
       const list = await requestJson(port, "GET", "/api/jobs");
       assert.equal(list.status, 200);
-      assert.equal(list.json.jobs.length, 1);
+      assert.equal(list.json.jobs.length, 2);
       assert.equal(JSON.stringify(list.json).includes("/home/"), false);
     });
   } finally { await rm(root, { recursive: true, force: true }); }

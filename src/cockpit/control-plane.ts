@@ -15,7 +15,11 @@ import {
   type EditorialJobStage,
   type EditorialJobState,
 } from "../schemas/editorial-job.js";
-import { createProductionEditorialRunner, type EditorialRunner } from "../editorial/run-editorial-job.js";
+import {
+  createProductionEditorialRunner,
+  inspectProductionEditorialRunnerReadiness,
+  type EditorialRunner,
+} from "../editorial/run-editorial-job.js";
 import { createJobStore, type JobStore } from "../storage/job-store.js";
 
 export const CONTROL_PLANE_MAX_BODY_BYTES = 32_000;
@@ -34,6 +38,7 @@ const API_ERROR_MESSAGES: Record<string, string> = {
   not_found: "O processo não foi encontrado.",
   conflict: "Já existe um processo ativo.",
   unavailable: "A operação não está disponível neste momento.",
+  runner_not_configured: "O runner editorial ainda não está configurado no serviço.",
   too_large: "O pedido excede o limite permitido.",
 };
 
@@ -76,10 +81,13 @@ export type ControlPlaneOptions = {
   actionsEnabled?: boolean;
   origin?: string;
   csrfToken?: string;
+  environment?: NodeJS.ProcessEnv;
+  logger?: Pick<Console, "error">;
 };
 
 export type ControlPlane = {
   readonly actionsEnabled: boolean;
+  readonly runnerReady: boolean;
   readonly csrfToken: string;
   readonly store: JobStore;
   getJobs(): Promise<SafeJob[]>;
@@ -98,21 +106,27 @@ class ControlPlaneError extends Error {
 }
 
 export function createControlPlane(options: ControlPlaneOptions = {}): ControlPlane {
-  const store = options.store ?? options.jobStore ?? createJobStore(options.dataDir ?? process.env.SCRAPE_AGENT_DATA_DIR ?? "data");
-  const requestedActions = options.actionsEnabled ?? process.env.SCRAPE_AGENT_COCKPIT_ACTIONS === "1";
+  const environment = options.environment ?? process.env;
+  const dataDir = options.dataDir ?? environment.SCRAPE_AGENT_DATA_DIR ?? "data";
+  const store = options.store ?? options.jobStore ?? createJobStore(dataDir);
+  const requestedActions = options.actionsEnabled ?? environment.SCRAPE_AGENT_COCKPIT_ACTIONS === "1";
   const csrfToken = options.csrfToken ?? randomBytes(32).toString("base64url");
-  const configuredOrigin = normalizeConfiguredOrigin(options.origin ?? process.env.SCRAPE_AGENT_COCKPIT_ORIGIN);
+  const configuredOrigin = normalizeConfiguredOrigin(options.origin ?? environment.SCRAPE_AGENT_COCKPIT_ORIGIN);
+  const logger = options.logger ?? console;
   // A mutation surface is only advertised when its exact origin is configured;
   // missing origin fails closed instead of showing controls that can never work.
   const actionsEnabled = requestedActions && configuredOrigin !== undefined;
-  // Creating this proxy does not resolve provider credentials. Configuration is
-  // resolved only when a mutation first asks for the production runner.
+  const productionReadiness = inspectProductionEditorialRunnerReadiness(environment);
+  const runnerReady = options.runner !== undefined || productionReadiness.ready;
+  // Creating this proxy does not create provider clients. Configuration is
+  // resolved only when a ready mutation first asks for the production runner.
   let runner: EditorialRunner | undefined = options.runner;
   let recovery: Promise<void> | undefined;
   const background = new Set<Promise<unknown>>();
 
   function getRunner(): EditorialRunner {
-    if (!runner) runner = createProductionEditorialRunner(options.dataDir ?? process.env.SCRAPE_AGENT_DATA_DIR ?? "data");
+    if (!runnerReady) throw new ControlPlaneError(503, "runner_not_configured");
+    if (!runner) runner = createProductionEditorialRunner(dataDir, environment);
     return runner;
   }
 
@@ -237,7 +251,7 @@ export function createControlPlane(options: ControlPlaneOptions = {}): ControlPl
           const job = await store.get(id);
           await writeJson(response, 200, { job: await toSafeJob(store, job) }, method === "HEAD");
         } else {
-          await writeJson(response, 200, { jobs: await getJobs(), actionsEnabled }, method === "HEAD");
+          await writeJson(response, 200, { jobs: await getJobs(), actionsEnabled, runnerReady }, method === "HEAD");
         }
         return true;
       }
@@ -271,13 +285,19 @@ export function createControlPlane(options: ControlPlaneOptions = {}): ControlPl
       return true;
     } catch (error) {
       const safe = error instanceof ControlPlaneError ? error : new ControlPlaneError(500, "unavailable");
+      if ((request.method ?? "GET") === "POST" && safe.status >= 500) {
+        const cause = safe.code === "runner_not_configured"
+          ? `runner configuration unavailable (${productionReadiness.unavailableVariables.join(", ")})`
+          : "unexpected operational failure";
+        logger.error(`Cockpit mutation failed: ${cause}.`);
+      }
       await writeJson(response, safe.status, { error: { code: safe.code, message: API_ERROR_MESSAGES[safe.code] ?? API_ERROR_MESSAGES.unavailable } });
       return true;
     }
   }
 
   void recoverOnce();
-  return { actionsEnabled, csrfToken, store, getJobs, handle };
+  return { actionsEnabled, runnerReady, csrfToken, store, getJobs, handle };
 }
 
 export async function toSafeJob(store: JobStore, job: EditorialJob): Promise<SafeJob> {

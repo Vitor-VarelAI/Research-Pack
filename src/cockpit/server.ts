@@ -74,6 +74,7 @@ export async function handleCockpitRequest(
     const scriptNonce = randomBytes(18).toString("base64");
     const html = renderCockpitHtml(model, {
       actionsEnabled: controlPlane.actionsEnabled,
+      runnerReady: controlPlane.runnerReady,
       csrfToken: controlPlane.csrfToken,
       jobs,
       scriptNonce,

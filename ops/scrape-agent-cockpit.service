@@ -7,6 +7,7 @@ Wants=network-online.target
 Type=simple
 WorkingDirectory=/home/vitor/projects/scrape-agent-visual-cockpit
 EnvironmentFile=/home/vitor/.config/scrape-agent-cockpit/env
+EnvironmentFile=-/home/vitor/.config/scrape-agent-cockpit/providers.env
 ExecStart=/home/vitor/.nvm/versions/node/v24.15.0/bin/node /home/vitor/projects/scrape-agent-visual-cockpit/dist/cockpit/server.js
 Restart=on-failure
 RestartSec=5

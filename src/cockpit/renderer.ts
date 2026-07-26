@@ -88,6 +88,7 @@ export function safeExternalUrl(value: string | undefined): string | undefined {
 
 export type CockpitRenderOptions = {
   actionsEnabled?: boolean;
+  runnerReady?: boolean;
   csrfToken?: string;
   jobs?: SafeJob[];
   scriptNonce?: string;
@@ -103,7 +104,9 @@ export function renderCockpitHtml(model: CockpitModel, options: CockpitRenderOpt
     ? model.packages.map((item) => `<option value="${escapeHtml(item.slug)}"${item.slug === model.selectedSlug ? " selected" : ""}>${escapeHtml(item.title)}${item.publishedOn ? ` · ${escapeHtml(formatDate(item.publishedOn))}` : ""}</option>`).join("")
     : `<option value="">Nenhum pacote disponível</option>`;
   const actionsEnabled = options.actionsEnabled === true;
-  const actionLabel = actionsEnabled ? "Ações disponíveis" : "Apenas leitura";
+  const runnerReady = options.runnerReady === true;
+  const actionsAvailable = actionsEnabled && runnerReady;
+  const actionLabel = !actionsEnabled ? "Apenas leitura" : runnerReady ? "Ações disponíveis" : "Configuração necessária";
 
   return `<!doctype html>
 <html lang="pt-PT">
@@ -147,7 +150,7 @@ export function renderCockpitHtml(model: CockpitModel, options: CockpitRenderOpt
         </div>
       </header>
       ${allWarnings.length > 0 ? renderWarnings(allWarnings) : ""}
-      ${renderControlPlane(options.jobs ?? [], actionsEnabled, options.csrfToken ?? "")}
+      ${renderControlPlane(options.jobs ?? [], actionsEnabled, runnerReady)}
       ${renderSummary(model, selected)}
       <main>
         <section id="radar" class="section" aria-labelledby="radar-title">
@@ -175,7 +178,7 @@ export function renderCockpitHtml(model: CockpitModel, options: CockpitRenderOpt
           ${renderQa(selected)}
         </section>
       </main>
-      <footer class="footer"><span>Read model local · ${actionsEnabled ? "ações controladas" : "sem escrita de dados"}</span><span class="action-state" data-action-state>${escapeHtml(actionLabel)}</span><span>PT-PT · seis áreas operacionais</span></footer>
+      <footer class="footer"><span>Read model local · ${actionsAvailable ? "ações controladas" : "sem escrita de dados"}</span><span class="action-state" data-action-state>${escapeHtml(actionLabel)}</span><span>PT-PT · seis áreas operacionais</span></footer>
     </div>
   </div>
   <script${options.scriptNonce ? ` nonce="${escapeHtml(options.scriptNonce)}"` : ""}>${clientScript(options.csrfToken ?? "")}</script>
@@ -183,12 +186,13 @@ export function renderCockpitHtml(model: CockpitModel, options: CockpitRenderOpt
 </html>`;
 }
 
-function renderControlPlane(jobs: SafeJob[], actionsEnabled: boolean, csrfToken: string): string {
+function renderControlPlane(jobs: SafeJob[], actionsEnabled: boolean, runnerReady: boolean): string {
   const active = jobs.find((job) => !["completed", "failed", "cancelled", "interrupted"].includes(job.state));
-  const status = actionsEnabled ? "Ações disponíveis" : "Apenas leitura";
-  const recent = jobs.length > 0 ? jobs.slice(0, 4).map((job) => renderJobCard(job, actionsEnabled)).join("") : `<p class="muted">Ainda não existem processos controlados pelo cockpit.</p>`;
-  return `<section class="control-plane" id="controlo" data-actions-enabled="${actionsEnabled ? "true" : "false"}" aria-labelledby="control-plane-title">
-    <div class="control-plane-heading"><div><p class="kicker">Control plane / processo editorial</p><h2 id="control-plane-title">Mesa de operação</h2><p class="section-note">Um processo de cada vez, com decisões humanas nos pontos certos.</p></div><div class="control-plane-actions"><span class="control-status ${actionsEnabled ? "is-on" : "is-off"}" id="control-status" role="status"><span class="status-dot" aria-hidden="true"></span>${status}</span><button class="primary-button" id="new-content" type="button"${actionsEnabled && !active ? "" : " disabled"} aria-haspopup="dialog">Novo conteúdo</button></div></div>
+  const actionsAvailable = actionsEnabled && runnerReady;
+  const status = !actionsEnabled ? "Apenas leitura" : runnerReady ? "Ações disponíveis" : "Configuração necessária";
+  const recent = jobs.length > 0 ? jobs.slice(0, 4).map((job) => renderJobCard(job, actionsAvailable)).join("") : `<p class="muted">Ainda não existem processos controlados pelo cockpit.</p>`;
+  return `<section class="control-plane" id="controlo" data-actions-enabled="${actionsEnabled ? "true" : "false"}" data-runner-ready="${runnerReady ? "true" : "false"}" aria-labelledby="control-plane-title">
+    <div class="control-plane-heading"><div><p class="kicker">Control plane / processo editorial</p><h2 id="control-plane-title">Mesa de operação</h2><p class="section-note">Um processo de cada vez, com decisões humanas nos pontos certos.</p></div><div class="control-plane-actions"><span class="control-status ${actionsAvailable ? "is-on" : "is-off"}" id="control-status" role="status"><span class="status-dot" aria-hidden="true"></span>${status}</span><button class="primary-button" id="new-content" type="button"${actionsAvailable && !active ? "" : " disabled"} aria-haspopup="dialog">Novo conteúdo</button></div></div>
     <div class="control-jobs" id="control-jobs" aria-label="Processos recentes">${recent}</div><p class="sr-only" id="control-announcement" role="status" aria-live="polite" aria-atomic="true"></p>
   </section>
   <dialog class="compose-dialog" id="compose-dialog" aria-labelledby="compose-title">
@@ -513,6 +517,7 @@ function clientScript(csrfToken: string): string {
   return `(() => {
   const csrfToken = ${JSON.stringify(csrfToken)};
   let actionsEnabled = document.getElementById('controlo')?.getAttribute('data-actions-enabled') === 'true';
+  let runnerReady = document.getElementById('controlo')?.getAttribute('data-runner-ready') === 'true';
   const select = document.getElementById('package-select');
   const jobsRoot = document.getElementById('control-jobs');
   const status = document.getElementById('control-status');
@@ -603,7 +608,7 @@ function clientScript(csrfToken: string): string {
       });
       card.append(timeline);
     }
-    if (actionsEnabled && job.state === 'awaiting_angle' && Array.isArray(job.angles)) {
+    if (actionsEnabled && runnerReady && job.state === 'awaiting_angle' && Array.isArray(job.angles)) {
       const desk = element('div', undefined, 'decision-desk');
       desk.append(element('strong', 'Escolhe um ângulo'));
       const cards = element('div', undefined, 'angle-cards');
@@ -615,7 +620,7 @@ function clientScript(csrfToken: string): string {
       });
       desk.append(cards, button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
       card.append(desk);
-    } else if (job.state === 'awaiting_final_approval') {
+    } else if (actionsEnabled && runnerReady && job.state === 'awaiting_final_approval') {
       const desk = element('div', undefined, 'decision-desk review-desk');
       desk.append(element('strong', 'Revisão final'));
       if (job.review) desk.append(element('h3', job.review.title), element('p', job.review.description), element('p', 'QA ' + job.review.qaVerdict + ' · ' + job.review.formatCount + ' formatos · ' + job.review.slideCount + ' slides'));
@@ -623,11 +628,11 @@ function clientScript(csrfToken: string): string {
       actions.append(button('Rejeitar', 'secondary-button reject-job', () => rejectJob(job.id), { 'data-job-id': job.id }), button('Aprovar', 'primary-button approve-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/approve', { decision: 'approve' }), { 'data-job-id': job.id }));
       desk.append(actions, button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
       card.append(desk);
-    } else if (job.state === 'failed' || job.state === 'interrupted') {
+    } else if (actionsEnabled && runnerReady && (job.state === 'failed' || job.state === 'interrupted')) {
       card.append(element('p', 'Repetir pode repetir etapas pagas.', 'timeline-warning'));
       if (job.rejectionNote) card.append(element('p', 'Nota: ' + job.rejectionNote, 'job-result'));
       card.append(button('Repetir etapa', 'primary-button retry-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/retry', {}), { 'data-job-id': job.id }));
-    } else if (['queued', 'researching', 'source_gate', 'diagnosing', 'drafting', 'formatting', 'qa'].includes(job.state)) {
+    } else if (actionsEnabled && runnerReady && ['queued', 'researching', 'source_gate', 'diagnosing', 'drafting', 'formatting', 'qa'].includes(job.state)) {
       card.append(button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
     }
     if (job.state === 'completed' && job.packageSlug && select) {
@@ -651,15 +656,19 @@ function clientScript(csrfToken: string): string {
   function safeDisplayUrl(value) {
     try { const parsed = new URL(value); parsed.search = ''; parsed.hash = ''; return parsed.toString(); } catch { return 'URL não disponível'; }
   }
-  function updateActionState(jobs) {
+  function updateActionState(jobs, nextActionsEnabled = actionsEnabled, nextRunnerReady = runnerReady) {
     const section = document.getElementById('controlo');
-    const apiEnabled = section?.getAttribute('data-actions-enabled') === 'true';
-    actionsEnabled = apiEnabled;
+    actionsEnabled = nextActionsEnabled === true;
+    runnerReady = nextRunnerReady === true;
+    section?.setAttribute('data-actions-enabled', String(actionsEnabled));
+    section?.setAttribute('data-runner-ready', String(runnerReady));
+    const available = actionsEnabled && runnerReady;
+    const label = !actionsEnabled ? 'Apenas leitura' : runnerReady ? 'Ações disponíveis' : 'Configuração necessária';
     const active = jobs.some((job) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state));
-    document.querySelectorAll('[data-action-state]').forEach((node) => { node.textContent = actionsEnabled ? 'Ações disponíveis' : 'Apenas leitura'; });
+    document.querySelectorAll('[data-action-state]').forEach((node) => { node.textContent = label; });
     const newContent = document.getElementById('new-content');
-    if (newContent) newContent.disabled = !actionsEnabled || active;
-    if (status && !status.classList.contains('is-error')) { status.textContent = actionsEnabled ? 'Ações disponíveis' : 'Apenas leitura'; status.classList.toggle('is-off', !actionsEnabled); status.classList.toggle('is-on', actionsEnabled); }
+    if (newContent) newContent.disabled = !available || active;
+    if (status && !status.classList.contains('is-error')) { status.textContent = label; status.classList.toggle('is-off', !available); status.classList.toggle('is-on', available); }
   }
   function announceJobs(jobs) {
     const next = new Map(jobs.map((job) => [job.id, job.state]));
@@ -673,16 +682,16 @@ function clientScript(csrfToken: string): string {
     node.textContent = '';
     window.setTimeout(() => { node.textContent = message; }, 0);
   }
-  function renderJobs(jobs) {
+  function renderJobs(jobs, nextActionsEnabled = actionsEnabled, nextRunnerReady = runnerReady) {
     if (!jobsRoot) return;
-    updateActionState(jobs);
+    updateActionState(jobs, nextActionsEnabled, nextRunnerReady);
     announceJobs(jobs);
     jobsRoot.replaceChildren();
     if (!jobs.length) jobsRoot.append(element('p', 'Ainda não existem processos controlados pelo cockpit.', 'muted'));
     jobs.slice(0, 4).forEach((job) => jobsRoot.append(renderJob(job)));
   }
   async function mutate(path, payload) {
-    if (!actionsEnabled) return false;
+    if (!actionsEnabled || !runnerReady) return false;
     try {
       const response = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken }, body: JSON.stringify(payload), credentials: 'same-origin' });
       let body = {};
@@ -726,7 +735,7 @@ function clientScript(csrfToken: string): string {
       const response = await fetch('/api/jobs', { headers: { Accept: 'application/json' }, credentials: 'same-origin', cache: 'no-store' });
       if (!response.ok) return;
       const data = await response.json();
-      if (Array.isArray(data.jobs)) renderJobs(data.jobs);
+      if (Array.isArray(data.jobs)) renderJobs(data.jobs, data.actionsEnabled, data.runnerReady);
       const active = Array.isArray(data.jobs) && data.jobs.some((job) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state));
       if (active) {
         const current = data.jobs.find((job) => !['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state));
@@ -751,7 +760,7 @@ function clientScript(csrfToken: string): string {
     else if (target.classList.contains('retry-job')) void mutate('/api/jobs/' + encodeURIComponent(id) + '/retry', {});
   });
 
-  function openCompose() { if (actionsEnabled && dialog?.showModal) { composeTrigger = document.activeElement; if (composeError) composeError.hidden = true; dialog.showModal(); window.setTimeout(() => sourceValue?.focus(), 0); } }
+  function openCompose() { if (actionsEnabled && runnerReady && dialog?.showModal) { composeTrigger = document.activeElement; if (composeError) composeError.hidden = true; dialog.showModal(); window.setTimeout(() => sourceValue?.focus(), 0); } }
   function closeCompose() { closeDialogSafely(dialog, composeTrigger); }
   document.getElementById('new-content')?.addEventListener('click', openCompose);
   document.getElementById('compose-close')?.addEventListener('click', closeCompose);

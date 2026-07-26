@@ -32,14 +32,16 @@ npm run export:html -- /absolute/path/to/editorial-package
 
 ## Visual cockpit
 
-The cockpit is a private editorial operations desk over existing artifacts and the fixed control-plane API. Actions remain disabled by default; set `SCRAPE_AGENT_COCKPIT_ACTIONS=1` and the exact server-only `SCRAPE_AGENT_COCKPIT_ORIGIN` only after local validation. The runner accepts a validated URL or topic, uses bounded Firecrawl discovery and direct DeepSeek generation, and never accepts shell, provider, model, prompt, executable or path options from the browser. Read-only browsing starts without provider credentials because production configuration is resolved only on a mutating action. The default data root is `data/`; point it at an existing runtime data directory with `SCRAPE_AGENT_DATA_DIR`.
+The cockpit is a private editorial operations desk over existing artifacts and the fixed control-plane API. Actions remain disabled by default; set `SCRAPE_AGENT_COCKPIT_ACTIONS=1` and the exact server-only `SCRAPE_AGENT_COCKPIT_ORIGIN` only after local validation. The runner accepts a validated URL or topic, uses bounded Firecrawl discovery and direct DeepSeek generation, and never accepts shell, provider, model, prompt, executable or path options from the browser. The UI advertises actions only when `FIRECRAWL_API_KEY`, `DEEPSEEK_API_KEY`, a valid HTTP(S) `DEEPSEEK_BASE_URL`, and `DEEPSEEK_MODEL` are present in the service environment. This readiness check is local: it creates no provider clients and makes no network requests. Read-only browsing remains available when provider configuration is absent or invalid. The default data root is `data/`; point it at an existing runtime data directory with `SCRAPE_AGENT_DATA_DIR`.
 
 ```bash
 SCRAPE_AGENT_DATA_DIR=/home/vitor/projects/scrape-agent/data npm run cockpit
 # opens http://127.0.0.1:4173
 ```
 
-For the persistent VPS deployment, install `ops/scrape-agent-cockpit.service` as the `vitor` user at `~/.config/systemd/user/scrape-agent-cockpit.service`. Create the mode `0600` environment file with only non-secret settings, install the unit, and then activate it:
+For the persistent VPS deployment, install `ops/scrape-agent-cockpit.service` as the `vitor` user at `~/.config/systemd/user/scrape-agent-cockpit.service`. Keep non-secret cockpit settings in `~/.config/scrape-agent-cockpit/env` and provider credentials in the dedicated `~/.config/scrape-agent-cockpit/providers.env`; both files must be mode `0600`. The unit loads `providers.env` optionally, so a missing file leaves the cockpit available in read-only/configuration-required mode. Cockpit code never auto-loads a repository `.env`, and the unit keeps `/home/vitor/projects/scrape-agent/.env` inaccessible to the process.
+
+Create the files, install the unit, and activate it:
 
 ```bash
 install -d -m 700 ~/.config/scrape-agent-cockpit ~/.config/systemd/user
@@ -48,6 +50,10 @@ printf '%s\n' \
   'SCRAPE_AGENT_HOST=127.0.0.1' \
   'SCRAPE_AGENT_PORT=4173' > ~/.config/scrape-agent-cockpit/env
 chmod 600 ~/.config/scrape-agent-cockpit/env
+install -m 0600 /dev/null ~/.config/scrape-agent-cockpit/providers.env
+# Edit providers.env locally and add valid values for exactly:
+# FIRECRAWL_API_KEY, DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+${EDITOR:-vi} ~/.config/scrape-agent-cockpit/providers.env
 install -m 0644 ops/scrape-agent-cockpit.service ~/.config/systemd/user/scrape-agent-cockpit.service
 npm run build
 systemctl --user daemon-reload
