@@ -46,6 +46,7 @@ import {
 import { evaluateSourceGate, SENSITIVE_CATEGORIES, SourceGateResultSchema, type SensitiveCategory, type SourceGateAnchor } from "../schemas/source-gate.js";
 import { createJobStore, type JobStore } from "../storage/job-store.js";
 import { createPackageWriter, type PackageWriter } from "./package-writer.js";
+import { detectEditorialSlop, detectFormatsSlop, formatSlopViolation } from "./no-ai-slop.js";
 import { assertPublicHttpUrl, systemPublicHostResolver, type PublicHostResolver } from "../security/public-host.js";
 import { buildAnglesPrompt, buildDiagnosisPrompt, buildDraftPrompt, buildEditorialQaPrompt, buildFormatsPrompt, buildFormatsQaPrompt, buildResearchPrompt, delimit, EDITORIAL_SYSTEM_PROMPT } from "./prompts.js";
 
@@ -653,6 +654,16 @@ export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGener
       return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: formats. Return the six derivatives and exactly ten publication slides JSON.` }, { role: "user", content: buildFormatsPrompt(draft, diagnosis) }], schema: EditorialFormatsSchema, signal });
     },
     async qa({ researchPack, draft, formats, signal }) {
+      const localEditorialViolations = detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation);
+      const localFormatsViolations = detectFormatsSlop(formats).map(formatSlopViolation);
+      if (localEditorialViolations.length > 0 || localFormatsViolations.length > 0) {
+        return combinedEditorialQa(
+          researchPack,
+          draft,
+          localQaCheck(localEditorialViolations),
+          localQaCheck(localFormatsViolations),
+        );
+      }
       const editorialLint = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft) }], schema: EditorialLintQaSchema, signal }));
       const formatsLint = parseQaResult(FormatsLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured formats QA. Return only the fixed structured formats QA JSON.` }, { role: "user", content: buildFormatsQaPrompt(draft, formats) }], schema: FormatsLintQaSchema, signal }));
       return combinedEditorialQa(researchPack, draft, editorialLint, formatsLint);
@@ -850,6 +861,16 @@ function parseQaResult<T>(schema: z.ZodType<T>, value: unknown): T {
   const error = new Error("DeepSeek QA returned invalid structured output") as Error & { code: "generation_invalid" };
   error.code = "generation_invalid";
   throw error;
+}
+
+function localQaCheck(violations: string[]): EditorialLintQa {
+  return EditorialLintQaSchema.parse({
+    pass: violations.length === 0,
+    model_verdict: violations.length === 0 ? "PASS" : "HOLD",
+    violations,
+    sourceRisks: [],
+    rhythmRisks: [],
+  });
 }
 
 function qaCheckApproved(check: EditorialLintQa | FormatsLintQa): boolean {

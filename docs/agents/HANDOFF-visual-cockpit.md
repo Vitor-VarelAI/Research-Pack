@@ -1,64 +1,99 @@
-# Handoff — feat/visual-cockpit (voz editorial + correções do cockpit)
+# Handoff — feat/visual-cockpit (voz editorial + anti-slop)
 
-Sessão de 2026-07-27. Branch `feat/visual-cockpit`. Atualizado pelo agente Claude.
+Sessão de 2026-07-27. Worktree `/home/vitor/projects/scrape-agent-visual-cockpit`.
+Branch `feat/visual-cockpit`.
 
-## Objetivo da sessão
+## Objetivo atual
 
-Ligar a UI do cockpit ao backend editorial e afinar a voz editorial para diagnóstico
-estratégico (não "notícia de jornal"). Base inicial: `53cc91a`.
+Usar os exemplos editoriais antigos do Vitor como referência de voz e remover fórmulas
+de escrita geradas por AI antes da aprovação. As conversas ditadas pelo Willow Voice
+não são a referência principal porque contêm erros de transcrição e de cadência.
 
-## O que foi feito (commits, mais recente primeiro)
+Referências privadas, lidas mas não alteradas:
 
-| Commit | O quê | Porquê |
-| --- | --- | --- |
-| `53b7fb9` | refine: tratar o leitor por "tu" na voz editorial | Draft saía em "você/lhe" (formal); fixado 2ª pessoa singular |
-| `5197948` | refine: voz mais coloquial; banir abertura em ficha de specs e cadeias de citação | Texto ainda soava técnico: abria por specs e encadeava (BBC, Reuters, CNBC) |
-| `91fad06` | fix: navegação de package converge para o job completed mais recente | Cockpit fazia reload infinito a saltar entre dois pacotes |
-| `d1bab28` | fix: rejeitar URLs de busca/agregador na descoberta de âncoras | Research metia links de pesquisa (hn.algolia.com/?query=) como âncora → source gate falhava sempre com 2 |
-| `f554bfc` | feat: injetar voz editorial na geração e no QA | Prompts de voz existiam mas estavam desligados do runtime; draft saía como jornal |
+```text
+/home/vitor/projects/scrape-agent/profiles/editorial/voice.md
+/home/vitor/projects/scrape-agent/profiles/editorial/soul.md
+```
 
-## Causas-raiz confirmadas (com evidência)
+Referência externa de padrões: `https://github.com/petergyang/no-ai-slop`.
 
-1. **Voz de jornal** — `EDITORIAL_SYSTEM_PROMPT` (`src/editorial/prompts.ts`) só dizia
-   "cumpre o JSON". Os docs de voz (`prompts/*.md`, `profiles/editorial/*.md`) só eram
-   usados por scripts `.sh` offline, nunca no runtime. Corrigido com a constante
-   `EDITORIAL_VOICE`, injetada em draft, formatos e nos dois QA.
-2. **Source gate falhava sempre** — `isLikelyNavigationOrPolicyUrl`
-   (`src/editorial/run-editorial-job.ts`) não filtrava URLs de busca. Um link
-   `hn.algolia.com/?query=...` ocupava um slot de descoberta, não gerava claims, era
-   descartado pelo gate → ficavam 2 âncoras (< 3 exigidas). Filtro estendido para hosts
-   de busca/agregador e formas `?query=`/`?q=`/`/search`.
-3. **Reload infinito** — a navegação `?package=` estava dentro de `renderJob` (corre por
-   cada job). Com dois jobs `completed`, cada um impunha o seu slug ao URL. Movido para
-   `renderJobs`, alvo único = job completed mais recente.
+## Alteração preparada para teste
 
-## Estado atual
+Commit: `refine: add deterministic anti-slop gate`.
 
-- Serviço `scrape-agent-cockpit.service` (systemd --user): `active`, HTTPS 200 em
-  `https://vmi3305438.tail917695.ts.net:10000/`.
-- `npm run typecheck` / `npm test` (167 testes) / `npm run build`: todos a passar.
-- Pacote de validação publicado com a voz nova:
-  `data/editorial/a-carta-dos-pesos-abertos-que-duplicou-em-24-horas-e-o-que-esconde/`
-  (job Forbes/Huang open-weights; 5 âncoras, 10 slides, QA aprovado).
+- `src/editorial/prompts.ts`: a geração recebe um brief positivo de voz, sem catálogo
+  de frases proibidas. Ângulos, diagnóstico, draft e QA recebem os factos estruturados
+  do research pack sem `anchors[].text`, para não copiar a cadência das fontes.
+- `src/editorial/no-ai-slop.ts`: scanner determinístico para contrastes binários,
+  falsas revelações, kickers genéricos, cadeias de citações, tratamento formal,
+  conectores vazios e travessões.
+- `src/editorial/run-editorial-job.ts`: o scanner corre antes das duas chamadas
+  DeepSeek de QA. Uma violação gera `HOLD`, preserva draft/formatos para inspeção e
+  evita gastar as duas chamadas de QA.
+- `tests/editorial-core.test.ts`: cobre deteção e texto limpo, remoção da prosa bruta
+  dos prompts, separação entre brief positivo e regras negativas, bloqueio local sem
+  chamadas ao provider e o caminho limpo com exatamente duas chamadas QA.
 
-## Arquitetura da voz (para próximos ajustes)
+Arquitetura:
 
-- Fonte única de verdade em runtime: constante `EDITORIAL_VOICE` em
-  `src/editorial/prompts.ts`. É interpolada em `EDITORIAL_SYSTEM_PROMPT` e nos builders
-  de draft/formatos/QA. Ajustar a voz = editar esta constante (não os `.md`).
-- Os `.md` em `prompts/` e `profiles/editorial/` continuam como doc/scripts offline.
-- O QA runtime (`buildEditorialQaPrompt`/`buildFormatsQaPrompt`) é bloqueante e agora
-  reprova voz de jornal/slop.
+```text
+fontes e factos estruturados
+  -> geração com brief positivo de voz
+  -> scan determinístico anti-slop
+  -> QA DeepSeek, apenas se o scan local passar
+  -> aprovação humana
+```
 
-## Como correr um job por API (sem CLI)
+O catálogo negativo fica no scanner e no QA. Não é colocado no prompt de geração,
+porque repetir fórmulas proibidas ao modelo também as pode ensinar.
 
-Requer CSRF: header `X-CSRF-Token` (do `<meta name="csrf-token">` da página),
-`Origin` exato e `Sec-Fetch-Site: same-origin`. POST `/api/jobs` para criar,
-`/api/jobs/<id>/select-angle`, `/api/jobs/<id>/approve`. Cada job novo é chamada paga
-(Firecrawl + DeepSeek); aprovação é só promoção (sem custo).
+## Validação local
 
-## Pendente
+```text
+git diff --check: passou
+node --import tsx --test tests/editorial-core.test.ts: 34 testes passaram
+npm run typecheck: passou
+npm test: 170 testes passaram
+npm run build: passou
+```
 
-- Push dos commits locais para `origin/feat/visual-cockpit`.
-- Decisão do Vitor: a voz com "tu" ainda não foi vista num job novo (o pacote Forbes é
-  anterior ao commit `53b7fb9`). Confirmar com novo job pago ou aceitar como está.
+Não foi executado nenhum job editorial pago nesta sessão.
+
+## Teste seguinte
+
+Criar um job real pela UI e observar o draft e os formatos. O antigo job Kimi K3
+`job_a923c908-d8f3-41f4-b5dc-a7bce8824927` contém exemplos úteis de regressão para
+comparação:
+
+```text
+A pergunta que fica não é X. A pergunta é Y.
+Já não é um chatbot. É um trabalhador autónomo.
+O verdadeiro debate está para vir.
+```
+
+Resultado esperado:
+
+1. A geração deve aproximar-se da referência antiga sem copiar a estrutura das fontes.
+2. Se uma fórmula detetável sobreviver, o job deve parar em QA com `HOLD` e uma
+   violação `[no-ai-slop:<regra>]`.
+3. Se o scan local passar, continuam a existir exatamente duas chamadas DeepSeek de
+   QA antes da aprovação humana.
+
+## Operação
+
+- Serviço: `scrape-agent-cockpit.service` via `systemctl --user`.
+- URL privada: `https://vmi3305438.tail917695.ts.net:10000/`.
+- Modelo configurado: `deepseek-v4-flash`.
+- O serviço corre `dist/cockpit/server.js` deste worktree.
+- Não tocar no Studio em `:443`.
+
+## Histórico relevante
+
+| Commit | Alteração |
+| --- | --- |
+| `53b7fb9` | Tratar o leitor por `tu` na voz editorial |
+| `5197948` | Voz mais coloquial e bloqueio de aberturas técnicas/cadeias de citação |
+| `91fad06` | Navegação converge para o package completed mais recente |
+| `d1bab28` | Rejeição de URLs de busca/agregador na descoberta de âncoras |
+| `f554bfc` | Ligação da voz editorial ao runtime e ao QA |
