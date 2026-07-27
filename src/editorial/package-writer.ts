@@ -82,7 +82,11 @@ export async function writeEditorialPackage(input: EditorialPackageWriteInput, d
     finalDir = path.join(editorialRoot, slug);
   }
   assertContained(editorialRoot, finalDir);
-  const stagingRoot = path.join(editorialRoot, `.staging-${job.id}-${randomUUID()}`);
+  const stagingParent = path.join(editorialRoot, `.staging-${job.id}-${randomUUID()}`);
+  const stagingRoot = path.join(stagingParent, slug);
+  assertContained(editorialRoot, stagingParent);
+  assertContained(stagingParent, stagingRoot);
+  await mkdir(stagingParent, { recursive: false, mode: 0o700 });
   await mkdir(stagingRoot, { recursive: false, mode: 0o700 });
   try {
     await writeJson(path.join(stagingRoot, "research-pack.json"), researchPack);
@@ -133,6 +137,7 @@ export async function writeEditorialPackage(input: EditorialPackageWriteInput, d
     }
     await assertNoSymlinkTree(stagingRoot);
     await rename(stagingRoot, finalDir);
+    await rm(stagingParent, { recursive: true, force: true });
     return {
       slug,
       relativePath: path.relative(path.resolve(dataRoot), finalDir).split(path.sep).join("/"),
@@ -141,7 +146,7 @@ export async function writeEditorialPackage(input: EditorialPackageWriteInput, d
       htmlPath: htmlPath ? path.join("editorial", slug, "index.html") : null,
     };
   } catch (error) {
-    await rm(stagingRoot, { recursive: true, force: true });
+    await rm(stagingParent, { recursive: true, force: true });
     throw error;
   }
 }

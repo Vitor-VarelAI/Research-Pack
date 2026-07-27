@@ -852,4 +852,30 @@ describe("production DeepSeek QA", () => {
       } finally { await rm(root, { recursive: true, force: true }); }
     }
   });
+
+  it("promotes an HTML package atomically after human approval", async () => {
+    const root = await tempName("editorial-production-html-approval-");
+    try {
+      const generated = generation();
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => ({ anchors: generated.research.anchors }) },
+        generation: {
+          research: async () => generated.research,
+          angles: async () => generated.angles,
+          diagnosis: async () => generated.diagnosis,
+          draft: async () => generated.draft,
+          formats: async () => generated.formats,
+          qa: async () => generatedQa(generated),
+        },
+        packageWriter: createPackageWriter(root),
+      });
+      const first = await runner.start({ ...input, exportHtml: true });
+      const review = await runner.selectAngle(first.id, "angle-1");
+      assert.equal(review.state, "awaiting_final_approval");
+      assert.equal((await runner.approve(first.id)).state, "completed");
+      assert.match(await readFile(path.join(root, "editorial", "pacote-de-teste", "index.html"), "utf8"), /<!doctype html>/iu);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
 });

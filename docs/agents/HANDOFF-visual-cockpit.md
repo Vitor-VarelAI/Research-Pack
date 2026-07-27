@@ -33,7 +33,9 @@ Commit: `refine: add deterministic anti-slop gate`.
   segue para `awaiting_final_approval`; a decisão final pertence ao Vitor.
 - `src/editorial/package-writer.ts`: a aprovação humana pode publicar um pacote com
   alertas de QA. O pacote continua a exigir os dois artefactos estruturados de QA e
-  apresenta o resultado como `com alertas para revisão`, não como bloqueio.
+  apresenta o resultado como `com alertas para revisão`, não como bloqueio. O staging
+  atómico usa agora uma pasta filha com o slug final, para o exportador HTML validar o
+  manifest antes da promoção.
 - `tests/editorial-core.test.ts`: cobre deteção e texto limpo, remoção da prosa bruta
   dos prompts, separação entre brief positivo e regras negativas, duas chamadas QA
   mesmo com slop e aprovação humana apesar dos alertas.
@@ -61,7 +63,7 @@ e formatos válidos, o QA editorial é consultivo e nunca transforma o job em `f
 git diff --check: passou
 node --import tsx --test tests/editorial-core.test.ts: 34 testes passaram
 npm run typecheck: passou
-npm test: 170 testes passaram
+npm test: 171 testes passaram
 npm run build: passou
 ```
 
@@ -82,6 +84,19 @@ Resultado esperado:
 2. As violações `[no-ai-slop:<regra>]` aparecem como indicações no cockpit.
 3. O job termina em `awaiting_final_approval`, mesmo que o QA tenha `HOLD` ou alertas.
 4. O Vitor pode aprovar e gerar o pacote final, ou rejeitar para voltar ao draft.
+
+### Correção da aprovação HTML
+
+O retry já foi concluído e o job está em `awaiting_final_approval`. Duas tentativas de
+aprovação falharam porque o package writer exportava HTML dentro de
+`.staging-<job>-<uuid>`, enquanto `exportEditorialHtml()` exige que o basename da pasta
+seja igual a `publication.slug`. O staging passou a ser
+`.staging-<job>-<uuid>/<slug>/`, mantendo a escrita atómica e satisfazendo o contrato
+do exportador.
+
+Teste de regressão: aprovação humana com `exportHtml: true`, criação de `index.html` e
+transição para `completed`. O próximo clique deve ser apenas `Aprovar`; não repete
+Firecrawl, geração ou QA.
 
 ## Operação
 
