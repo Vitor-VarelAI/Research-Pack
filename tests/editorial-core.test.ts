@@ -9,7 +9,7 @@ import { loadCockpitModel } from "../src/cockpit/adapter.js";
 import { createDeepSeekClient, DeepSeekRequestError, type DeepSeekClient } from "../src/providers/deepseek.js";
 import { FIRECRAWL_AGENT_POLL_TIMEOUT_MS, FirecrawlAgentTimeoutError, runFirecrawlAgent, searchFirecrawl } from "../src/providers/firecrawl.js";
 import { EditorialJobInputSchema, assertEditorialJobTransition } from "../src/schemas/editorial-job.js";
-import { createDeepSeekGeneration, createEditorialRunner, createFirecrawlCollector, MAX_PRODUCTION_ANCHOR_TEXT_BYTES, MAX_PRODUCTION_DISCOVERY_SOURCES, MAX_PRODUCTION_SOURCE_TEXT_BYTES } from "../src/editorial/run-editorial-job.js";
+import { createDeepSeekGeneration, createEditorialRunner, createFirecrawlCollector, isLikelyNavigationOrPolicyUrl, MAX_PRODUCTION_ANCHOR_TEXT_BYTES, MAX_PRODUCTION_DISCOVERY_SOURCES, MAX_PRODUCTION_SOURCE_TEXT_BYTES } from "../src/editorial/run-editorial-job.js";
 import { createPackageWriter } from "../src/editorial/package-writer.js";
 import { serializeUntrusted } from "../src/editorial/prompts.js";
 import { assertPublicHttpUrl } from "../src/security/public-host.js";
@@ -62,6 +62,26 @@ function deepSeekMock(responses: unknown[], calls: string[]): DeepSeekClient {
 }
 
 describe("editorial control-plane contracts", () => {
+  it("filters search, navigation and policy URLs while keeping articles", () => {
+    for (const url of [
+      "https://hn.algolia.com/?query=foo&type=story",
+      "https://www.google.com/",
+      "https://www.google.com/search?q=foo",
+      "https://www.google.co.uk/search",
+      "https://example.com/search?q=foo",
+      "https://example.com/cookie-policy",
+      "https://example.com/tag/design",
+    ]) {
+      assert.equal(isLikelyNavigationOrPolicyUrl(new URL(url)), true);
+    }
+    for (const url of [
+      "https://www.bloomberg.com/news/articles/2026-07-17/real-article",
+      "https://example.com/news/real-article",
+    ]) {
+      assert.equal(isLikelyNavigationOrPolicyUrl(new URL(url)), false);
+    }
+  });
+
   it("rejects URL credentials, private literals, sensitive context and unknown input fields", () => {
     assert.throws(() => EditorialJobInputSchema.parse({ kind: "url", url: "https://user:pass@example.com", context: "", output: "blog-formats", exportHtml: false }));
     assert.throws(() => EditorialJobInputSchema.parse({ kind: "url", url: "https://example.com/?token=secret", context: "", output: "blog-formats", exportHtml: false }));

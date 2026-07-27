@@ -754,9 +754,22 @@ function canonicalDiscoveryUrls(input: EditorialJobInput, discovered: readonly s
   return urls;
 }
 
-function isLikelyNavigationOrPolicyUrl(url: URL): boolean {
+const NAVIGATION_HOSTS = new Set(["hn.algolia.com", "www.google.com", "bing.com", "duckduckgo.com", "search.brave.com", "search.marginalia.nu"]);
+const GOOGLE_HOSTNAME_RE = /(?:^|\.)google\./iu;
+const SEARCH_PATH_RE = /(^|\/)search(\/|$)/iu;
+const NAVIGATION_PATH_RE = /(?:^|\/)(?:author|authors|category|categories|cookie-policy(?:-[a-z]{2})?|privacy-policy|tag|tags)(?:\/|$)/iu;
+const SEARCH_QUERY_PARAMS = new Set(["query", "q", "search", "keyword"]);
+
+export function isLikelyNavigationOrPolicyUrl(url: URL): boolean {
   if (/(?:^|\.)cookiedatabase\.org$/iu.test(url.hostname)) return true;
-  return /(?:^|\/)(?:author|authors|category|categories|cookie-policy(?:-[a-z]{2})?|privacy-policy|tag|tags)(?:\/|$)/iu.test(url.pathname);
+  if (NAVIGATION_PATH_RE.test(url.pathname)) return true;
+
+  const hostname = url.hostname.toLowerCase();
+  if ([...NAVIGATION_HOSTS].some((host) => hostname === host || hostname.endsWith(`.${host}`))) return true;
+  if (GOOGLE_HOSTNAME_RE.test(hostname) && SEARCH_PATH_RE.test(url.pathname)) return true;
+  if (hostname.startsWith("search.")) return true;
+  if (SEARCH_PATH_RE.test(url.pathname)) return true;
+  return [...SEARCH_QUERY_PARAMS].some((param) => url.searchParams.has(param));
 }
 
 function boundUtf8(value: string, maxBytes: number): string {
