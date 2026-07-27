@@ -635,12 +635,6 @@ function clientScript(csrfToken: string): string {
     } else if (actionsEnabled && runnerReady && ['queued', 'researching', 'source_gate', 'diagnosing', 'drafting', 'formatting', 'qa'].includes(job.state)) {
       card.append(button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
     }
-    if (job.state === 'completed' && job.packageSlug && select) {
-      select.value = job.packageSlug;
-      const url = new URL(window.location.href);
-      url.searchParams.set('package', job.packageSlug);
-      if (new URL(window.location.href).searchParams.get('package') !== job.packageSlug) window.location.assign(url.pathname + url.search + window.location.hash);
-    }
     return card;
   }
   function formatStageDuration(value) {
@@ -686,6 +680,14 @@ function clientScript(csrfToken: string): string {
     if (!jobsRoot) return;
     updateActionState(jobs, nextActionsEnabled, nextRunnerReady);
     announceJobs(jobs);
+    const target = jobs.find((job) => job.state === 'completed' && job.packageSlug);
+    if (target && select) {
+      select.value = target.packageSlug;
+      const url = new URL(window.location.href);
+      url.searchParams.set('package', target.packageSlug);
+      const current = new URL(window.location.href).searchParams.get('package');
+      if (current !== target.packageSlug) window.location.assign(url.pathname + url.search + window.location.hash);
+    }
     jobsRoot.replaceChildren();
     if (!jobs.length) jobsRoot.append(element('p', 'Ainda não existem processos controlados pelo cockpit.', 'muted'));
     jobs.slice(0, 4).forEach((job) => jobsRoot.append(renderJob(job)));
