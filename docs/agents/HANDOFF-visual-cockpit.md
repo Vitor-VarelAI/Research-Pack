@@ -18,7 +18,7 @@ Referências privadas, lidas mas não alteradas:
 
 Referência externa de padrões: `https://github.com/petergyang/no-ai-slop`.
 
-## Alteração preparada para teste
+## Alterações
 
 Commit: `refine: add deterministic anti-slop gate`.
 
@@ -28,12 +28,15 @@ Commit: `refine: add deterministic anti-slop gate`.
 - `src/editorial/no-ai-slop.ts`: scanner determinístico para contrastes binários,
   falsas revelações, kickers genéricos, cadeias de citações, tratamento formal,
   conectores vazios e travessões.
-- `src/editorial/run-editorial-job.ts`: o scanner corre antes das duas chamadas
-  DeepSeek de QA. Uma violação gera `HOLD`, preserva draft/formatos para inspeção e
-  evita gastar as duas chamadas de QA.
+- `src/editorial/run-editorial-job.ts`: o scanner regista as violações junto do QA,
+  mas as duas chamadas DeepSeek continuam. Qualquer `HOLD`, `REVIEW` ou `pass=false`
+  segue para `awaiting_final_approval`; a decisão final pertence ao Vitor.
+- `src/editorial/package-writer.ts`: a aprovação humana pode publicar um pacote com
+  alertas de QA. O pacote continua a exigir os dois artefactos estruturados de QA e
+  apresenta o resultado como `com alertas para revisão`, não como bloqueio.
 - `tests/editorial-core.test.ts`: cobre deteção e texto limpo, remoção da prosa bruta
-  dos prompts, separação entre brief positivo e regras negativas, bloqueio local sem
-  chamadas ao provider e o caminho limpo com exatamente duas chamadas QA.
+  dos prompts, separação entre brief positivo e regras negativas, duas chamadas QA
+  mesmo com slop e aprovação humana apesar dos alertas.
 
 Arquitetura:
 
@@ -41,12 +44,16 @@ Arquitetura:
 fontes e factos estruturados
   -> geração com brief positivo de voz
   -> scan determinístico anti-slop
-  -> QA DeepSeek, apenas se o scan local passar
-  -> aprovação humana
+  -> QA DeepSeek
+  -> alertas editoriais
+  -> aprovação ou rejeição humana
 ```
 
 O catálogo negativo fica no scanner e no QA. Não é colocado no prompt de geração,
 porque repetir fórmulas proibidas ao modelo também as pode ensinar.
+
+O source gate factual continua bloqueante antes da escrita. Depois de existirem draft
+e formatos válidos, o QA editorial é consultivo e nunca transforma o job em `failed`.
 
 ## Validação local
 
@@ -58,27 +65,23 @@ npm test: 170 testes passaram
 npm run build: passou
 ```
 
-Não foi executado nenhum job editorial pago nesta sessão.
+O Vitor executou pela UI o job
+`job_3ecd71e6-7dde-4064-b072-d65f551fe09d`. A versão anterior parou incorretamente em
+QA devido a contrastes binários e um travessão. O draft e os formatos ficaram
+persistidos. Não repetir pesquisa, diagnóstico, draft ou formatos.
 
 ## Teste seguinte
 
-Criar um job real pela UI e observar o draft e os formatos. O antigo job Kimi K3
-`job_a923c908-d8f3-41f4-b5dc-a7bce8824927` contém exemplos úteis de regressão para
-comparação:
-
-```text
-A pergunta que fica não é X. A pergunta é Y.
-Já não é um chatbot. É um trabalhador autónomo.
-O verdadeiro debate está para vir.
-```
+Depois do deployment, usar `Retry` no job
+`job_3ecd71e6-7dde-4064-b072-d65f551fe09d`. O retry parte de QA e reutiliza os
+artefactos já pagos. Não iniciar outro job.
 
 Resultado esperado:
 
-1. A geração deve aproximar-se da referência antiga sem copiar a estrutura das fontes.
-2. Se uma fórmula detetável sobreviver, o job deve parar em QA com `HOLD` e uma
-   violação `[no-ai-slop:<regra>]`.
-3. Se o scan local passar, continuam a existir exatamente duas chamadas DeepSeek de
-   QA antes da aprovação humana.
+1. O retry faz apenas as duas verificações DeepSeek de QA.
+2. As violações `[no-ai-slop:<regra>]` aparecem como indicações no cockpit.
+3. O job termina em `awaiting_final_approval`, mesmo que o QA tenha `HOLD` ou alertas.
+4. O Vitor pode aprovar e gerar o pacote final, ou rejeitar para voltar ao draft.
 
 ## Operação
 

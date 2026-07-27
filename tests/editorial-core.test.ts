@@ -395,7 +395,7 @@ describe("mocked runner", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("retries QA against persisted outputs without regenerating the draft or formats", async () => {
+  it("keeps QA findings in human review without regenerating the draft or formats", async () => {
     const root = await tempName("editorial-qa-retry-");
     try {
       const generated = generation();
@@ -422,13 +422,12 @@ describe("mocked runner", () => {
         packageWriter: createPackageWriter(root),
       });
 
-      const failed = await runner.selectAngle((await runner.start(input)).id, "angle-1");
-      assert.equal(failed.state, "failed");
-      assert.equal(failed.failedStage, "qa");
-      assert.equal((await runner.retry(failed.id)).state, "awaiting_final_approval");
+      const review = await runner.selectAngle((await runner.start(input)).id, "angle-1");
+      assert.equal(review.state, "awaiting_final_approval");
+      assert.equal(review.failedStage, null);
       assert.equal(draftCalls, 1);
       assert.equal(formatCalls, 1);
-      assert.equal(qaCalls, 2);
+      assert.equal(qaCalls, 1);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -766,7 +765,7 @@ describe("production Firecrawl collector", () => {
 });
 
 describe("production DeepSeek QA", () => {
-  async function runWithChecks(root: string, editorialCheck: unknown, formatsCheck: unknown): Promise<{ state: string; calls: string[] }> {
+  async function runWithChecks(root: string, editorialCheck: unknown, formatsCheck: unknown): Promise<{ state: string; calls: string[]; jobId: string; runner: ReturnType<typeof createEditorialRunner> }> {
     const generated = generation();
     const calls: string[] = [];
     const responses: unknown[] = [
@@ -787,7 +786,7 @@ describe("production DeepSeek QA", () => {
     });
     const first = await runner.start(input);
     if (first.state !== "awaiting_angle") throw new Error(`unexpected research state: ${first.state}`);
-    return { state: (await runner.selectAngle(first.id, "angle-1")).state, calls };
+    return { state: (await runner.selectAngle(first.id, "angle-1")).state, calls, jobId: first.id, runner };
   }
 
   it("issues exactly one fixed editorial and one formats QA call, then promotes consumable separated evidence", async () => {
@@ -822,10 +821,10 @@ describe("production DeepSeek QA", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("blocks deterministic slop locally without spending the two model QA calls", async () => {
+  it("reports deterministic slop without skipping the two model QA calls", async () => {
     const generated = generation();
     const calls: string[] = [];
-    const qa = createDeepSeekGeneration(deepSeekMock([], calls)).qa;
+    const qa = createDeepSeekGeneration(deepSeekMock([qaCheck(true, "PASS"), qaCheck(true, "PASS")], calls)).qa;
     if (!qa) throw new Error("production generation must expose QA");
     const result = await qa({
       job: input,
@@ -840,15 +839,16 @@ describe("production DeepSeek QA", () => {
     assert.equal(result.passed, false);
     assert.equal(result.editorialLint?.model_verdict, "HOLD");
     assert.match(result.editorialLint?.violations[0] ?? "", /no-ai-slop:binary_contrast/u);
-    assert.equal(calls.length, 0);
+    assert.equal(calls.length, 2);
   });
 
-  it("blocks failed and contradictory model QA verdicts conservatively", async () => {
+  it("keeps failed and contradictory QA findings advisory and allows human approval", async () => {
     for (const [editorialCheck, formatsCheck] of [[qaCheck(true, "HOLD"), qaCheck(true, "PASS")], [qaCheck(true, "PASS"), qaCheck(false, "PASS")]] as const) {
-      const root = await tempName("editorial-production-qa-block-");
+      const root = await tempName("editorial-production-qa-advisory-");
       try {
         const result = await runWithChecks(root, editorialCheck, formatsCheck);
-        assert.equal(result.state, "failed");
+        assert.equal(result.state, "awaiting_final_approval");
+        assert.equal((await result.runner.approve(result.jobId)).state, "completed");
       } finally { await rm(root, { recursive: true, force: true }); }
     }
   });

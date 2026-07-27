@@ -173,7 +173,6 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     assertCanonicalSourceGate(calculateCanonicalSourceGate(job.input, researchPack.anchors), researchPack.sourceGate);
     assertCanonicalSourceGate(researchPack.sourceGate, persistedGate);
     if (!researchPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows promotion");
-    if (!isQaApproved(qa)) throw new Error("Editorial QA does not approve final promotion");
     const latest = await options.store.get(jobId);
     if (latest.state !== "awaiting_final_approval" || latest.revision !== job.revision) throw new Error("Editorial job changed before promotion");
     const finalPack = await readArtifact(jobId, "research-pack.json", EditorialResearchPackSchema.parse);
@@ -356,7 +355,6 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
       : evaluateEditorialQa(researchPack, draft, formats));
     const qaRef = await writeJsonArtifact(job.id, "qa.json", qa, execution, "qa");
     const current = await completeStage(job.id, "qa", qaRef);
-    if (!isQaApproved(qa)) return options.store.transition(current.id, "failed", { error: { code: "generation_invalid", stage: "qa", message: "Editorial QA blocked final approval" }, failedStage: "qa" }, { revision: current.revision, state: "qa" });
     return options.store.transition(current.id, "awaiting_final_approval", {}, { revision: current.revision, state: "qa" });
   }
 
@@ -656,16 +654,20 @@ export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGener
     async qa({ researchPack, draft, formats, signal }) {
       const localEditorialViolations = detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation);
       const localFormatsViolations = detectFormatsSlop(formats).map(formatSlopViolation);
-      if (localEditorialViolations.length > 0 || localFormatsViolations.length > 0) {
-        return combinedEditorialQa(
-          researchPack,
-          draft,
-          localQaCheck(localEditorialViolations),
-          localQaCheck(localFormatsViolations),
-        );
-      }
-      const editorialLint = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft) }], schema: EditorialLintQaSchema, signal }));
-      const formatsLint = parseQaResult(FormatsLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured formats QA. Return only the fixed structured formats QA JSON.` }, { role: "user", content: buildFormatsQaPrompt(draft, formats) }], schema: FormatsLintQaSchema, signal }));
+      const modelEditorialLint = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft) }], schema: EditorialLintQaSchema, signal }));
+      const modelFormatsLint = parseQaResult(FormatsLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured formats QA. Return only the fixed structured formats QA JSON.` }, { role: "user", content: buildFormatsQaPrompt(draft, formats) }], schema: FormatsLintQaSchema, signal }));
+      const editorialLint = EditorialLintQaSchema.parse({
+        ...modelEditorialLint,
+        pass: modelEditorialLint.pass && localEditorialViolations.length === 0,
+        model_verdict: localEditorialViolations.length > 0 ? "HOLD" : modelEditorialLint.model_verdict,
+        violations: [...localEditorialViolations, ...modelEditorialLint.violations].slice(0, 30),
+      });
+      const formatsLint = FormatsLintQaSchema.parse({
+        ...modelFormatsLint,
+        pass: modelFormatsLint.pass && localFormatsViolations.length === 0,
+        model_verdict: localFormatsViolations.length > 0 ? "HOLD" : modelFormatsLint.model_verdict,
+        violations: [...localFormatsViolations, ...modelFormatsLint.violations].slice(0, 30),
+      });
       return combinedEditorialQa(researchPack, draft, editorialLint, formatsLint);
     },
   };
@@ -863,26 +865,12 @@ function parseQaResult<T>(schema: z.ZodType<T>, value: unknown): T {
   throw error;
 }
 
-function localQaCheck(violations: string[]): EditorialLintQa {
-  return EditorialLintQaSchema.parse({
-    pass: violations.length === 0,
-    model_verdict: violations.length === 0 ? "PASS" : "HOLD",
-    violations,
-    sourceRisks: [],
-    rhythmRisks: [],
-  });
-}
-
 function qaCheckApproved(check: EditorialLintQa | FormatsLintQa): boolean {
   return check.pass === true && check.model_verdict === "PASS";
 }
 
 function qaWarnings(check: EditorialLintQa | FormatsLintQa, label: string): string[] {
   return [...check.violations, ...check.sourceRisks, ...check.rhythmRisks].slice(0, 30).map((risk) => `${label}: ${risk}`.slice(0, 500));
-}
-
-function isQaApproved(qa: EditorialQa): boolean {
-  return qa.passed === true && qa.editorialLint !== undefined && qa.formatsLint !== undefined && qaCheckApproved(qa.editorialLint) && qaCheckApproved(qa.formatsLint);
 }
 
 function stageRunning(summaries: EditorialJob["stageSummaries"], stage: EditorialJobStage): EditorialJob["stageSummaries"] {
