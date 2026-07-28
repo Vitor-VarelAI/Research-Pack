@@ -6,18 +6,25 @@
  */
 import type { SourceGateResult } from "../../src/schemas/source-gate.js";
 
-const anchor = (sourceName: string, host: string): {
+type FixtureSourceType = "official" | "journalistic" | "technical" | "policy" | "market" | "other";
+
+const anchor = (
+  sourceName: string,
+  host: string,
+  sourceType: FixtureSourceType,
+  confirmedClaims: string[] = ["claim a"],
+): {
   sourceName: string;
   sourceUrl: string;
-  sourceType: "official" | "journalistic" | "technical" | "policy" | "market" | "other";
+  sourceType: FixtureSourceType;
   confirmedClaims: string[];
   unconfirmedClaims: string[];
   interpretationRisk: string;
 } => ({
   sourceName,
   sourceUrl: `https://${host}/`,
-  sourceType: "official",
-  confirmedClaims: ["claim a"],
+  sourceType,
+  confirmedClaims,
   unconfirmedClaims: [],
   interpretationRisk: "No obvious interpretation risk.",
 });
@@ -29,9 +36,9 @@ export const nonSensitivePassRaw: SourceGateResult = {
   needsExtraAnchor: false,
   sensitiveCategories: [],
   anchors: [
-    anchor("Official Blog", "blog.example.com"),
-    anchor("TechCrunch", "techcrunch.com"),
-    anchor("API Docs", "docs.example.com"),
+    anchor("Official Blog", "blog.example.com", "official"),
+    anchor("TechCrunch", "techcrunch.com", "journalistic"),
+    anchor("API Docs", "docs.example.com", "technical"),
   ],
   unsupportedClaims: [],
   diagnosisAllowed: true,
@@ -45,8 +52,8 @@ export const twoSourcesBlockRaw: SourceGateResult = {
   needsExtraAnchor: false,
   sensitiveCategories: [],
   anchors: [
-    anchor("Official Blog", "blog.example.com"),
-    anchor("TechCrunch", "techcrunch.com"),
+    anchor("Official Blog", "blog.example.com", "official"),
+    anchor("TechCrunch", "techcrunch.com", "journalistic"),
   ],
   unsupportedClaims: [],
   diagnosisAllowed: false,
@@ -60,9 +67,9 @@ export const sensitiveThreeBlockRaw: SourceGateResult = {
   needsExtraAnchor: true,
   sensitiveCategories: ["privacy"],
   anchors: [
-    anchor("Official Blog", "blog.example.com"),
-    anchor("TechCrunch", "techcrunch.com"),
-    anchor("API Docs", "docs.example.com"),
+    anchor("Official Blog", "blog.example.com", "official"),
+    anchor("TechCrunch", "techcrunch.com", "journalistic"),
+    anchor("API Docs", "docs.example.com", "technical"),
   ],
   unsupportedClaims: [],
   diagnosisAllowed: false,
@@ -76,14 +83,80 @@ export const sensitiveFourPassRaw: SourceGateResult = {
   needsExtraAnchor: true,
   sensitiveCategories: ["privacy"],
   anchors: [
-    anchor("Official Blog", "blog.example.com"),
-    anchor("TechCrunch", "techcrunch.com"),
-    anchor("API Docs", "docs.example.com"),
-    anchor("FTC", "ftc.gov"),
+    anchor("Official Blog", "blog.example.com", "official"),
+    anchor("TechCrunch", "techcrunch.com", "journalistic"),
+    anchor("API Docs", "docs.example.com", "technical"),
+    anchor("FTC", "ftc.gov", "policy"),
   ],
   unsupportedClaims: [],
   diagnosisAllowed: true,
   notes: "",
+};
+
+/** Four counted anchors without an official source — should block. */
+export const fourSourcesWithoutOfficialBlockRaw: SourceGateResult = {
+  pass: false,
+  minimumAnchorsFound: 4,
+  needsExtraAnchor: false,
+  sensitiveCategories: [],
+  anchors: [
+    anchor("Reuters", "reuters.com", "journalistic"),
+    anchor("Financial Times", "ft.com", "journalistic"),
+    anchor("Technical Analysis", "analysis.example.com", "technical"),
+    anchor("Market Filing", "markets.example.com", "market"),
+  ],
+  unsupportedClaims: [],
+  diagnosisAllowed: false,
+  notes: "No official source anchor.",
+};
+
+/** Three anchors, but the only official source has no confirmed claims. */
+export const unconfirmedOfficialBlockRaw: SourceGateResult = {
+  pass: false,
+  minimumAnchorsFound: 2,
+  needsExtraAnchor: false,
+  sensitiveCategories: [],
+  anchors: [
+    anchor("Official Blog", "blog.example.com", "official", []),
+    anchor("Reuters", "reuters.com", "journalistic"),
+    anchor("API Docs", "docs.example.com", "technical"),
+  ],
+  unsupportedClaims: [],
+  diagnosisAllowed: false,
+  notes: "The official anchor has no confirmed claims and is not counted.",
+};
+
+/** Four sensitive-topic anchors without a technical, policy, or market source. */
+export const sensitiveFourMissingSupportingBucketBlockRaw: SourceGateResult = {
+  pass: false,
+  minimumAnchorsFound: 4,
+  needsExtraAnchor: true,
+  sensitiveCategories: ["privacy"],
+  anchors: [
+    anchor("Official Blog", "blog.example.com", "official"),
+    anchor("Company Help Center", "help.example.com", "official"),
+    anchor("Reuters", "reuters.com", "journalistic"),
+    anchor("Financial Times", "ft.com", "journalistic"),
+  ],
+  unsupportedClaims: [],
+  diagnosisAllowed: false,
+  notes: "Sensitive topic lacks a technical, policy, or market anchor.",
+};
+
+/** Legacy gate that passed under the original count-only criteria. */
+export const legacyNoDiversityPassRaw: SourceGateResult = {
+  pass: true,
+  minimumAnchorsFound: 3,
+  needsExtraAnchor: false,
+  sensitiveCategories: [],
+  anchors: [
+    anchor("Reuters", "reuters.com", "journalistic"),
+    anchor("Financial Times", "ft.com", "journalistic"),
+    anchor("The Verge", "theverge.com", "journalistic"),
+  ],
+  unsupportedClaims: [],
+  diagnosisAllowed: true,
+  notes: "Legacy count-only source gate.",
 };
 
 /** Invalid JSON string for content-qa.sh failure tests. */

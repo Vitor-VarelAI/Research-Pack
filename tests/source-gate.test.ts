@@ -12,6 +12,7 @@ import {
   SourceGateResultSchema,
   evaluateSourceGate,
   parseSourceGateResult,
+  selectApprovedSourceGateAnchors,
   validateSourceGateFile,
   type SourceGateAnchor,
 } from "../src/schemas/source-gate.js";
@@ -23,19 +24,33 @@ import {
   invalidJsonString,
   twoSourcesForgedPassRaw,
   sensitiveThreeForgedPassRaw,
+  fourSourcesWithoutOfficialBlockRaw,
+  unconfirmedOfficialBlockRaw,
+  sensitiveFourMissingSupportingBucketBlockRaw,
+  legacyNoDiversityPassRaw,
 } from "./fixtures/source-gate-fixtures.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const cliPath = path.join(repoRoot, "src", "cli.ts");
 
-const anchor = (host: string): SourceGateAnchor => ({
+const anchor = (
+  host: string,
+  sourceType: SourceGateAnchor["sourceType"] = "official",
+  confirmedClaims: string[] = ["claim"],
+): SourceGateAnchor => ({
   sourceName: host,
   sourceUrl: `https://${host}/`,
-  sourceType: "official",
-  confirmedClaims: ["claim"],
+  sourceType,
+  confirmedClaims,
   unconfirmedClaims: [],
   interpretationRisk: "No obvious interpretation risk.",
 });
+
+const diverseAnchors = (): SourceGateAnchor[] => [
+  anchor("official.example.com", "official"),
+  anchor("news.example.com", "journalistic"),
+  anchor("docs.example.com", "technical"),
+];
 
 describe("source gate schema", () => {
   it("accepts a valid non-sensitive pass result", () => {
@@ -51,6 +66,26 @@ describe("source gate schema", () => {
     assert.equal(parsed.pass, false);
     assert.equal(parsed.diagnosisAllowed, false);
     assert.equal(parsed.minimumAnchorsFound, 2);
+  });
+
+  it("keeps a legacy quantity-based pass readable without source diversity", () => {
+    const parsed = parseSourceGateResult(legacyNoDiversityPassRaw);
+    assert.equal(parsed.pass, true);
+    assert.equal(parsed.minimumAnchorsFound, 3);
+  });
+
+  it("accepts a four-source block result without an official source", () => {
+    const parsed = parseSourceGateResult(fourSourcesWithoutOfficialBlockRaw);
+    assert.equal(parsed.pass, false);
+    assert.equal(parsed.diagnosisAllowed, false);
+    assert.equal(parsed.minimumAnchorsFound, 4);
+  });
+
+  it("does not count an anchor without confirmed claims", () => {
+    const parsed = parseSourceGateResult(unconfirmedOfficialBlockRaw);
+    assert.equal(parsed.minimumAnchorsFound, 2);
+    assert.equal(parsed.pass, false);
+    assert.equal(parsed.diagnosisAllowed, false);
   });
 
   it("rejects invalid source-gate JSON (not an object)", () => {
@@ -75,6 +110,7 @@ describe("source gate schema", () => {
   it("rejects adversarial sensitive JSON with 3 anchors but pass=true", () => {
     assert.throws(() => parseSourceGateResult(sensitiveThreeForgedPassRaw), /needsExtraAnchor|pass|diagnosisAllowed/);
   });
+
 });
 
 describe("source gate evaluation logic", () => {
@@ -89,16 +125,82 @@ describe("source gate evaluation logic", () => {
 
   it("3 anchors pass for non-sensitive topics", () => {
     const result = evaluateSourceGate({
-      anchors: [anchor("a.com"), anchor("b.com"), anchor("c.com")],
+      anchors: diverseAnchors(),
     });
     assert.equal(result.pass, true);
     assert.equal(result.diagnosisAllowed, true);
     assert.equal(result.needsExtraAnchor, false);
   });
 
+  it("blocks when any required source-type bucket is missing", () => {
+    const cases: Array<{ name: string; anchors: SourceGateAnchor[] }> = [
+      {
+        name: "official",
+        anchors: [
+          anchor("news.example.com", "journalistic"),
+          anchor("docs.example.com", "technical"),
+          anchor("market.example.com", "market"),
+        ],
+      },
+      {
+        name: "journalistic",
+        anchors: [
+          anchor("official.example.com", "official"),
+          anchor("docs.example.com", "technical"),
+          anchor("policy.example.com", "policy"),
+        ],
+      },
+      {
+        name: "technical|policy|market",
+        anchors: [
+          anchor("official.example.com", "official"),
+          anchor("news-one.example.com", "journalistic"),
+          anchor("news-two.example.com", "journalistic"),
+        ],
+      },
+    ];
+
+    for (const testCase of cases) {
+      const result = evaluateSourceGate({ anchors: testCase.anchors });
+      assert.equal(result.minimumAnchorsFound, 3, testCase.name);
+      assert.equal(result.pass, false, testCase.name);
+      assert.equal(result.diagnosisAllowed, false, testCase.name);
+    }
+  });
+
+  it("does not count anchors without confirmed claims toward count or diversity", () => {
+    const result = evaluateSourceGate({
+      anchors: [
+        anchor("official.example.com", "official", []),
+        anchor("news.example.com", "journalistic"),
+        anchor("docs.example.com", "technical"),
+      ],
+    });
+
+    assert.equal(result.minimumAnchorsFound, 2);
+    assert.equal(result.pass, false);
+    assert.equal(result.diagnosisAllowed, false);
+  });
+
+  it("exposes only confirmed anchors as approved downstream evidence", () => {
+    const result = evaluateSourceGate({
+      anchors: [
+        anchor("official.example.com", "official"),
+        anchor("journalistic.example.com", "journalistic", []),
+        anchor("docs.example.com", "technical"),
+        anchor("unconfirmed.example.com", "other", []),
+      ],
+    });
+
+    assert.deepEqual(
+      selectApprovedSourceGateAnchors(result.anchors).map((item) => item.sourceUrl),
+      ["https://official.example.com/", "https://docs.example.com/"],
+    );
+  });
+
   it("sensitive topic requires 4 anchors (3 blocks)", () => {
     const result = evaluateSourceGate({
-      anchors: [anchor("a.com"), anchor("b.com"), anchor("c.com")],
+      anchors: diverseAnchors(),
       sensitiveCategories: ["privacy"],
     });
     assert.equal(result.pass, false);
@@ -109,12 +211,23 @@ describe("source gate evaluation logic", () => {
 
   it("sensitive topic passes with 4 anchors", () => {
     const result = evaluateSourceGate({
-      anchors: [anchor("a.com"), anchor("b.com"), anchor("c.com"), anchor("d.com")],
+      anchors: [...diverseAnchors(), anchor("policy.example.com", "policy")],
       sensitiveCategories: ["privacy", "security"],
     });
     assert.equal(result.pass, true);
     assert.equal(result.diagnosisAllowed, true);
     assert.equal(result.sensitiveCategories.length, 2);
+  });
+
+  it("sensitive topic with 4 anchors still blocks without full diversity", () => {
+    const result = evaluateSourceGate({
+      anchors: sensitiveFourMissingSupportingBucketBlockRaw.anchors,
+      sensitiveCategories: ["privacy"],
+    });
+    assert.equal(result.minimumAnchorsFound, 4);
+    assert.equal(result.needsExtraAnchor, true);
+    assert.equal(result.pass, false);
+    assert.equal(result.diagnosisAllowed, false);
   });
 
   it("SENSITIVE_CATEGORIES matches the project-defined set", () => {

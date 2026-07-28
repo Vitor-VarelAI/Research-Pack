@@ -215,7 +215,28 @@ function renderControlPlane(jobs: SafeJob[], actionsEnabled: boolean, runnerRead
 function renderJobCard(job: SafeJob, actionsEnabled: boolean): string {
   const active = !["completed", "failed", "cancelled", "interrupted"].includes(job.state);
   const stateLabel = stateCopy(job.state);
-  return `<article class="job-card ${active ? "is-active" : ""}" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><span class="eyebrow">${active ? "Em curso" : "Recente"}</span><h3>${escapeHtml(inputLabel(job.input))}</h3></div><span class="job-state ${stateClass(job.state)}">${escapeHtml(stateLabel)}</span></div>${active || job.state === "failed" || job.state === "interrupted" ? renderTimeline(job) : `<p class="job-result">${job.state === "completed" ? "Pacote concluído e pronto a abrir." : escapeHtml(job.error?.message ?? "Processo terminado.")}</p>`}${actionsEnabled ? renderJobDecision(job) : ""}</article>`;
+  return `<article class="job-card ${active ? "is-active" : ""}" data-job-id="${escapeHtml(job.id)}"><div class="job-card-head"><div><span class="eyebrow">${active ? "Em curso" : "Recente"}</span><h3>${escapeHtml(inputLabel(job.input))}</h3></div><span class="job-state ${stateClass(job.state)}">${escapeHtml(stateLabel)}</span></div>${active || job.state === "failed" || job.state === "interrupted" ? renderTimeline(job) : renderJobResult(job)}${actionsEnabled ? renderJobDecision(job) : ""}</article>`;
+}
+
+function renderJobResult(job: SafeJob): string {
+  if (job.state !== "completed") return `<p class="job-result">${escapeHtml(job.error?.message ?? "Processo terminado.")}</p>`;
+  const qaStatus = job.review && (job.review.qaVerdict !== "PASS" || job.review.qaWarnings.length > 0)
+    ? `<span class="job-qa-status">QA ${escapeHtml(job.review.qaVerdict)} · ${escapeHtml(String(job.review.qaWarnings.length))} aviso(s)</span>`
+    : "";
+  return `<p class="job-result">Pacote gerado e pronto a abrir no cockpit.${qaStatus}</p>`;
+}
+
+function renderReviewWarnings(review: SafeJob["review"]): string {
+  if (!review || review.qaWarnings.length === 0) return "";
+  return `<div class="review-warnings"><strong class="review-warnings-title">Avisos QA</strong><ul>${review.qaWarnings.slice(0, 5).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul></div>`;
+}
+
+function reviewNeedsWarning(review: SafeJob["review"]): boolean {
+  return review === null || review.qaVerdict !== "PASS" || review.qaWarnings.length > 0;
+}
+
+function approvalLabel(review: SafeJob["review"]): string {
+  return reviewNeedsWarning(review) ? "Aprovar com avisos" : "Aprovar";
 }
 
 function renderTimeline(job: SafeJob): string {
@@ -224,7 +245,7 @@ function renderTimeline(job: SafeJob): string {
 
 function renderJobDecision(job: SafeJob): string {
   if (job.state === "awaiting_angle") return `<div class="decision-desk"><div><span class="eyebrow">Decisão necessária</span><strong>Escolhe um ângulo</strong><p>Há exatamente três leituras propostas para este processo.</p></div><div class="angle-cards">${job.angles.slice(0, 3).map((angle) => `<article class="angle-card"><span class="angle-number">${escapeHtml(angle.id)}</span><h3>${escapeHtml(angle.title)}</h3><p>${escapeHtml(angle.thesis)}</p><p class="angle-why"><strong>Porque agora:</strong> ${escapeHtml(angle.whyNow)}</p><span class="evidence-count">${escapeHtml(String(angle.evidenceCount))} evidência(s)</span><button class="secondary-button angle-select" type="button" data-angle-id="${escapeHtml(angle.id)}" data-job-id="${escapeHtml(job.id)}">Escolher este ângulo</button></article>`).join("")}</div><button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button></div>`;
-  if (job.state === "awaiting_final_approval") return `<div class="decision-desk review-desk"><div><span class="eyebrow">Decisão necessária</span><strong>Revisão final</strong><p>Confirma o draft, a verificação e as saídas antes de promover o pacote.</p></div>${job.review ? `<div class="review-summary"><h3>${escapeHtml(job.review.title)}</h3><p>${escapeHtml(job.review.description)}</p><div class="review-metrics"><span>QA <b>${escapeHtml(job.review.qaVerdict)}</b></span><span>${escapeHtml(String(job.review.formatCount))} formatos</span><span>${escapeHtml(String(job.review.slideCount))} slides</span><span>${escapeHtml(String(job.review.qaWarnings))} aviso(s)</span></div></div>` : `<p class="muted">Resumo de revisão indisponível.</p>`}<div class="review-actions"><button class="secondary-button reject-job" type="button" data-job-id="${escapeHtml(job.id)}">Rejeitar</button><button class="primary-button approve-job" type="button" data-job-id="${escapeHtml(job.id)}">Aprovar</button></div><button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button></div>`;
+  if (job.state === "awaiting_final_approval") return `<div class="decision-desk review-desk"><div><span class="eyebrow">Decisão necessária</span><strong>Revisão final</strong><p>Confirma o draft, a verificação e as saídas antes de promover o pacote.</p><p class="review-consultative-note">O QA é consultivo; a decisão final continua a ser humana.</p></div>${job.review ? `<div class="review-summary"><h3>${escapeHtml(job.review.title)}</h3><p>${escapeHtml(job.review.description)}</p><div class="review-metrics"><span>QA <b>${escapeHtml(job.review.qaVerdict)}</b></span><span>${escapeHtml(String(job.review.formatCount))} formatos</span><span>${escapeHtml(String(job.review.slideCount))} slides</span><span>${escapeHtml(String(job.review.qaWarnings.length))} aviso(s)</span></div>${renderReviewWarnings(job.review)}</div>` : `<p class="muted">Resumo de revisão indisponível.</p>`}<div class="review-actions"><button class="secondary-button reject-job" type="button" data-job-id="${escapeHtml(job.id)}">Rejeitar</button><button class="primary-button approve-job" type="button" data-job-id="${escapeHtml(job.id)}">${approvalLabel(job.review)}</button></div><button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button></div>`;
   if (["failed", "interrupted"].includes(job.state)) return `<div class="decision-desk"><div><span class="eyebrow">Ação disponível</span><strong>${escapeHtml(job.error?.message ?? "O processo precisa de atenção.")}</strong><p class="timeline-warning">Repetir pode repetir etapas pagas.</p>${job.rejectionNote ? `<p class="job-result"><strong>Nota:</strong> ${escapeHtml(job.rejectionNote)}</p>` : ""}</div><div class="review-actions"><button class="primary-button retry-job" type="button" data-job-id="${escapeHtml(job.id)}">Repetir etapa</button></div></div>`;
   if (!["completed", "cancelled"].includes(job.state)) return `<button class="danger-quiet cancel-job" type="button" data-job-id="${escapeHtml(job.id)}">Cancelar processo</button>`;
   return "";
@@ -246,7 +267,7 @@ function safeDisplayUrl(value: string): string {
 }
 
 function stateCopy(state: SafeJob["state"]): string {
-  const labels: Record<SafeJob["state"], string> = { queued: "Na fila", researching: "A pesquisar", source_gate: "Source gate", awaiting_angle: "A aguardar decisão", diagnosing: "Diagnóstico", drafting: "Draft", formatting: "Formatos", qa: "QA", awaiting_final_approval: "A aguardar decisão", completed: "Concluído", failed: "Falhou", cancelled: "Cancelado", interrupted: "Interrompido" };
+  const labels: Record<SafeJob["state"], string> = { queued: "Na fila", researching: "A pesquisar", source_gate: "Source gate", awaiting_angle: "A aguardar decisão", diagnosing: "Diagnóstico", drafting: "Draft", formatting: "Formatos", qa: "QA", awaiting_final_approval: "A aguardar decisão", completed: "Pacote local", failed: "Falhou", cancelled: "Cancelado", interrupted: "Interrompido" };
   return labels[state];
 }
 
@@ -377,14 +398,7 @@ export function evidenceDecision(value: unknown): string {
 }
 
 function sourceGateDecision(value: SourceGateResult): QaSignal {
-  const requiredAnchors = value.sensitiveCategories.length > 0 ? 4 : 3;
-  const expectedPass = value.anchors.length >= requiredAnchors;
-  const consistent = value.minimumAnchorsFound === value.anchors.length
-    && value.needsExtraAnchor === (value.sensitiveCategories.length > 0)
-    && value.pass === expectedPass
-    && value.diagnosisAllowed === expectedPass;
-  if (!consistent) return "CONTRADITÓRIO";
-  return expectedPass ? "PASS" : "HOLD";
+  return value.pass ? "PASS" : "HOLD";
 }
 
 function conservativeEvidenceDecision(value: unknown): QaSignal {
@@ -587,6 +601,18 @@ function clientScript(csrfToken: string): string {
     Object.entries(attributes || {}).forEach(([key, value]) => node.setAttribute(key, String(value)));
     return node;
   }
+  function reviewNeedsWarning(review) {
+    return !review || review.qaVerdict !== 'PASS' || !Array.isArray(review.qaWarnings) || review.qaWarnings.length > 0;
+  }
+  function appendReviewWarnings(parent, review) {
+    if (!review || !Array.isArray(review.qaWarnings) || review.qaWarnings.length === 0) return;
+    const block = element('div', undefined, 'review-warnings');
+    block.append(element('strong', 'Avisos QA', 'review-warnings-title'));
+    const list = element('ul');
+    review.qaWarnings.slice(0, 5).forEach((warning) => list.append(element('li', warning)));
+    block.append(list);
+    parent.append(block);
+  }
   function renderJob(job) {
     const card = element('article', undefined, 'job-card' + (['completed', 'failed', 'cancelled', 'interrupted'].includes(job.state) ? '' : ' is-active'));
     card.dataset.jobId = job.id;
@@ -595,7 +621,13 @@ function clientScript(csrfToken: string): string {
     copy.append(element('span', 'Processo editorial', 'eyebrow'), element('h3', job.input.kind === 'url' ? safeDisplayUrl(job.input.url) : job.input.topic));
     head.append(copy, element('span', stateLabel(job.state), 'job-state ' + stateClass(job.state)));
     card.append(head);
-    if (job.stages) {
+    if (job.state === 'completed') {
+      const result = element('p', 'Pacote gerado e pronto a abrir no cockpit.', 'job-result');
+      if (job.review && (job.review.qaVerdict !== 'PASS' || !Array.isArray(job.review.qaWarnings) || job.review.qaWarnings.length > 0)) {
+        result.append(element('span', 'QA ' + job.review.qaVerdict + ' · ' + (Array.isArray(job.review.qaWarnings) ? job.review.qaWarnings.length : 0) + ' aviso(s)', 'job-qa-status'));
+      }
+      card.append(result);
+    } else if (job.stages) {
       const timeline = element('ol', undefined, 'editorial-timeline');
       job.stages.forEach((stage) => {
         const item = element('li', undefined, 'timeline-stage is-' + stage.status);
@@ -623,9 +655,14 @@ function clientScript(csrfToken: string): string {
     } else if (actionsEnabled && runnerReady && job.state === 'awaiting_final_approval') {
       const desk = element('div', undefined, 'decision-desk review-desk');
       desk.append(element('strong', 'Revisão final'));
-      if (job.review) desk.append(element('h3', job.review.title), element('p', job.review.description), element('p', 'QA ' + job.review.qaVerdict + ' · ' + job.review.formatCount + ' formatos · ' + job.review.slideCount + ' slides'));
+      if (job.review) {
+        desk.append(element('h3', job.review.title), element('p', job.review.description), element('p', 'O QA é consultivo; a decisão final continua a ser humana.'), element('p', 'QA ' + job.review.qaVerdict + ' · ' + job.review.formatCount + ' formatos · ' + job.review.slideCount + ' slides'));
+        appendReviewWarnings(desk, job.review);
+      } else {
+        desk.append(element('p', 'Resumo de revisão indisponível.'), element('p', 'O QA é consultivo; a decisão final continua a ser humana.'));
+      }
       const actions = element('div', undefined, 'review-actions');
-      actions.append(button('Rejeitar', 'secondary-button reject-job', () => rejectJob(job.id), { 'data-job-id': job.id }), button('Aprovar', 'primary-button approve-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/approve', { decision: 'approve' }), { 'data-job-id': job.id }));
+      actions.append(button('Rejeitar', 'secondary-button reject-job', () => rejectJob(job.id), { 'data-job-id': job.id }), button(reviewNeedsWarning(job.review) ? 'Aprovar com avisos' : 'Aprovar', 'primary-button approve-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/approve', { decision: 'approve' }), { 'data-job-id': job.id }));
       desk.append(actions, button('Cancelar processo', 'danger-quiet cancel-job', () => mutate('/api/jobs/' + encodeURIComponent(job.id) + '/cancel', {}), { 'data-job-id': job.id }));
       card.append(desk);
     } else if (actionsEnabled && runnerReady && (job.state === 'failed' || job.state === 'interrupted')) {
@@ -642,7 +679,7 @@ function clientScript(csrfToken: string): string {
     return seconds < 60 ? seconds + 's' : Math.floor(seconds / 60) + 'm ' + seconds % 60 + 's';
   }
   function stateLabel(value) {
-    return ({ queued: 'Na fila', researching: 'A pesquisar', source_gate: 'Source gate', awaiting_angle: 'A aguardar decisão', diagnosing: 'Diagnóstico', drafting: 'Draft', formatting: 'Formatos', qa: 'QA', awaiting_final_approval: 'A aguardar decisão', completed: 'Concluído', failed: 'Falhou', cancelled: 'Cancelado', interrupted: 'Interrompido' })[value] || 'Estado do processo';
+    return ({ queued: 'Na fila', researching: 'A pesquisar', source_gate: 'Source gate', awaiting_angle: 'A aguardar decisão', diagnosing: 'Diagnóstico', drafting: 'Draft', formatting: 'Formatos', qa: 'QA', awaiting_final_approval: 'A aguardar decisão', completed: 'Pacote local', failed: 'Falhou', cancelled: 'Cancelado', interrupted: 'Interrompido' })[value] || 'Estado do processo';
   }
   function stateClass(value) {
     return value === 'completed' ? 'is-good' : value === 'failed' || value === 'interrupted' ? 'is-warning' : value === 'awaiting_angle' || value === 'awaiting_final_approval' ? 'is-decision' : 'is-neutral';
@@ -849,6 +886,12 @@ select { width:100%; padding:0 34px 0 12px; border:1px solid var(--line-strong);
 .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
 .dialog-error { margin:-5px 0 0; padding:10px 12px; border-left:3px solid var(--red); background:#fff0ed; color:var(--red); font-size:.75rem; line-height:1.4; }
 .job-result { margin:14px 0 0; color:var(--ink-soft); font-size:.78rem; }
+.job-qa-status { display:block; margin-top:5px; color:#80501f; font-size:.68rem; font-weight:800; }
+.review-consultative-note { color:var(--ink-soft); font-size:.75rem; }
+.review-warnings { margin-top:12px; padding:10px 12px; border-left:3px solid #c58a3a; background:#fffaf0; color:var(--ink-soft); }
+.review-warnings-title { display:block; color:#80501f; font-size:.7rem; text-transform:uppercase; letter-spacing:.08em; }
+.review-warnings ul { margin:6px 0 0; padding-left:18px; }
+.review-warnings li { margin-top:4px; font-size:.75rem; line-height:1.4; }
 .editorial-timeline { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:7px; margin:18px 0 0; padding:0; list-style:none; }
 .timeline-stage { position:relative; min-width:0; min-height:75px; padding:10px 8px; border-top:2px solid var(--line); }
 .timeline-stage.is-running { border-color:var(--teal); background:#f1faf6; }

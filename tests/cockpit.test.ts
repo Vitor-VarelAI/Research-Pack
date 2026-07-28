@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { loadCockpitModel, safeJoin } from "../src/cockpit/adapter.js";
 import { evidenceDecision, renderCockpitHtml, renderMarkdownSafe, safeExternalUrl, scrubForDisplay } from "../src/cockpit/renderer.js";
 import { createCockpitServer, resolveCockpitHost, startCockpitServer, UNSAFE_HOST_OPT_IN } from "../src/cockpit/server.js";
+import type { SafeJob } from "../src/cockpit/control-plane.js";
 
 const fixtureRoot = resolve(process.cwd(), "tests/fixtures/cockpit-data");
 
@@ -55,6 +56,99 @@ test("renderiza as seis áreas, avisos, URLs seguras e separação QA", async ()
   assert.equal(html.includes("internal-run-id"), false);
   assert.equal(html.includes("token=remove"), false);
   assert.ok(html.includes("<meta name=\"viewport\""));
+});
+
+test("usa a decisão pass já validada no source gate", async () => {
+  const model = await loadCockpitModel({ dataDir: fixtureRoot });
+  const gate = model.selectedPackage?.sourceGate.value;
+  assert.ok(gate);
+  gate.pass = false;
+  gate.diagnosisAllowed = false;
+
+  const html = renderCockpitHtml(model);
+  const sourceStatus = html.match(/<div class="source-status[^>]*>[\s\S]*?<\/div>/u)?.[0];
+  assert.ok(sourceStatus);
+  assert.match(sourceStatus, /<strong>HOLD<\/strong>/u);
+});
+
+test("apresenta jobs completed como pacote local nos renderers inicial e client-side", async () => {
+  const model = await loadCockpitModel({ dataDir: fixtureRoot });
+  const completedJob: SafeJob = {
+    id: "job_completed",
+    state: "completed",
+    input: { kind: "topic", topic: "Tema local", context: "", output: "blog-formats", exportHtml: false },
+    createdAt: "2026-07-27T10:00:00.000Z",
+    updatedAt: "2026-07-27T10:05:00.000Z",
+    stages: [],
+    selectedAngle: null,
+    error: null,
+    angles: [],
+    review: {
+      title: "Pacote local",
+      description: "Descrição local",
+      qaVerdict: "HOLD",
+      qaWarnings: ["Aviso um", "Aviso dois"],
+      formatCount: 7,
+      slideCount: 10,
+    },
+    packageSlug: "demo-package",
+    rejectionNote: null,
+  };
+
+  const html = renderCockpitHtml(model, { jobs: [completedJob] });
+  const initialCard = html.match(/<article class="job-card " data-job-id="job_completed">[\s\S]*?<\/article>/u)?.[0];
+  assert.ok(initialCard);
+  assert.match(initialCard, /<span class="job-state is-good">Pacote local<\/span>/u);
+  assert.match(initialCard, /<p class="job-result">Pacote gerado e pronto a abrir no cockpit\.<span class="job-qa-status">QA HOLD · 2 aviso\(s\)<\/span><\/p>/u);
+  assert.doesNotMatch(initialCard, /Concluído|Pacote concluído|entrega pública/iu);
+
+  assert.ok(html.includes("completed: 'Pacote local'"));
+  assert.ok(html.includes("const result = element('p', 'Pacote gerado e pronto a abrir no cockpit.', 'job-result');"));
+  assert.ok(html.includes("'QA ' + job.review.qaVerdict + ' · ' + (Array.isArray(job.review.qaWarnings) ? job.review.qaWarnings.length : 0) + ' aviso(s)'"));
+  assert.equal(html.includes("completed: 'Concluído'"), false);
+  assert.equal(html.includes("Pacote concluído e pronto a abrir"), false);
+});
+
+test("mostra avisos QA e usa o CTA consultivo correto na revisão final inicial e client-side", async () => {
+  const model = await loadCockpitModel({ dataDir: fixtureRoot });
+  const reviewJob: SafeJob = {
+    id: "job_review",
+    state: "awaiting_final_approval",
+    input: { kind: "topic", topic: "Tema para rever", context: "", output: "blog-formats", exportHtml: false },
+    createdAt: "2026-07-27T10:00:00.000Z",
+    updatedAt: "2026-07-27T10:05:00.000Z",
+    stages: [],
+    selectedAngle: null,
+    error: null,
+    angles: [],
+    review: {
+      title: "Título do draft",
+      description: "Descrição do draft",
+      qaVerdict: "HOLD",
+      qaWarnings: ["Aviso <um>", "Aviso dois"],
+      formatCount: 7,
+      slideCount: 10,
+    },
+    packageSlug: null,
+    rejectionNote: null,
+  };
+  const html = renderCockpitHtml(model, { jobs: [reviewJob], actionsEnabled: true, runnerReady: true });
+
+  assert.ok(html.includes("O QA é consultivo; a decisão final continua a ser humana."));
+  assert.ok(html.includes("Avisos QA"));
+  assert.ok(html.includes("Aviso &lt;um&gt;"));
+  assert.match(html, />Aprovar com avisos</u);
+  assert.ok(html.includes("review.qaWarnings.slice(0, 5).forEach"));
+  assert.ok(html.includes("button(reviewNeedsWarning(job.review) ? 'Aprovar com avisos' : 'Aprovar'"));
+
+  const cleanJob: SafeJob = {
+    ...reviewJob,
+    id: "job_clean_review",
+    review: { ...reviewJob.review!, qaVerdict: "PASS", qaWarnings: [] },
+  };
+  const cleanHtml = renderCockpitHtml(model, { jobs: [cleanJob], actionsEnabled: true, runnerReady: true });
+  assert.match(cleanHtml, />Aprovar</u);
+  assert.doesNotMatch(cleanHtml, />Aprovar com avisos</u);
 });
 
 test("mostra quando o radar foi lido apenas pela cauda, sem depender dos avisos globais", async () => {

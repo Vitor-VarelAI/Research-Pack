@@ -9,6 +9,7 @@ import {
   nonSensitivePassRaw,
   twoSourcesBlockRaw,
   invalidJsonString,
+  fourSourcesWithoutOfficialBlockRaw,
 } from "./fixtures/source-gate-fixtures.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -40,6 +41,13 @@ describe("content-qa.sh source gate enforcement", () => {
       0,
       `linters must not run when gate blocks, but got ${result.lintCalls} calls`,
     );
+  });
+
+  it("blocks downstream linters when four sources lack an official anchor", () => {
+    const result = runContentQa({ gateJson: fourSourcesWithoutOfficialBlockRaw });
+    assert.notEqual(result.status, 0, "content-qa.sh should enforce source diversity");
+    assert.match(result.stderr, /Source gate did not approve|FAILED source gate validation|BLOCKED/i);
+    assert.equal(result.lintCalls, 0, "linters must not run without an official source anchor");
   });
 
   it("blocks downstream linters when gate JSON is invalid", () => {

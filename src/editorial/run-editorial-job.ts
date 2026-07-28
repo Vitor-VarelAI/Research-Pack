@@ -43,7 +43,7 @@ import {
   type EditorialLintQa,
   type FormatsLintQa,
 } from "../schemas/editorial-generation.js";
-import { evaluateSourceGate, SENSITIVE_CATEGORIES, SourceGateResultSchema, type SensitiveCategory, type SourceGateAnchor } from "../schemas/source-gate.js";
+import { evaluateSourceGate, selectApprovedSourceGateAnchors, SENSITIVE_CATEGORIES, SourceGateResultSchema, type SensitiveCategory, type SourceGateAnchor } from "../schemas/source-gate.js";
 import { createJobStore, type JobStore } from "../storage/job-store.js";
 import { createPackageWriter, type PackageWriter } from "./package-writer.js";
 import { detectEditorialSlop, detectFormatsSlop, formatSlopViolation } from "./no-ai-slop.js";
@@ -65,7 +65,7 @@ export type EditorialGeneration = {
   diagnosis(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; angle: EditorialAngleCandidate; signal: AbortSignal }): Promise<EditorialDiagnosis>;
   draft(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; signal: AbortSignal }): Promise<EditorialDraft>;
   formats(input: { job: EditorialJobInput; draft: EditorialDraft; diagnosis: EditorialDiagnosis; signal: AbortSignal }): Promise<EditorialFormats>;
-  qa?(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; draft: EditorialDraft; formats: EditorialFormats; signal: AbortSignal }): Promise<EditorialQa>;
+  qa?(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; draft: EditorialDraft; formats: EditorialFormats; signal: AbortSignal }): Promise<EditorialQa>;
 };
 
 export type EditorialRunnerOptions = {
@@ -171,14 +171,14 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const persistedGate = await readArtifact(jobId, "source-gate.json", SourceGateResultSchema.parse);
     validateEditorialEvidence(researchPack, draft, diagnosis);
     assertCanonicalSourceGate(calculateCanonicalSourceGate(job.input, researchPack.anchors), researchPack.sourceGate);
-    assertCanonicalSourceGate(researchPack.sourceGate, persistedGate);
+    assertSameSourceGate(researchPack.sourceGate, persistedGate);
     if (!researchPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows promotion");
     const latest = await options.store.get(jobId);
     if (latest.state !== "awaiting_final_approval" || latest.revision !== job.revision) throw new Error("Editorial job changed before promotion");
     const finalPack = await readArtifact(jobId, "research-pack.json", EditorialResearchPackSchema.parse);
     const finalGate = await readArtifact(jobId, "source-gate.json", SourceGateResultSchema.parse);
     assertCanonicalSourceGate(calculateCanonicalSourceGate(latest.input, finalPack.anchors), finalPack.sourceGate);
-    assertCanonicalSourceGate(finalPack.sourceGate, finalGate);
+    assertSameSourceGate(finalPack.sourceGate, finalGate);
     if (!finalPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows promotion");
     const result = await options.packageWriter.write({ job: latest, researchPack: finalPack, angles, diagnosis, draft, formats, qa });
     const publicationRef = { kind: "publication", path: `editorial/${result.slug}/publication.json`, createdAt: new Date().toISOString() };
@@ -301,10 +301,10 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const researchPack = persistedResearchPack ?? await readArtifact(job.id, "research-pack.json", EditorialResearchPackSchema.parse);
     const persistedGate = await readArtifact(job.id, "source-gate.json", SourceGateResultSchema.parse);
     assertCanonicalSourceGate(calculateCanonicalSourceGate(job.input, researchPack.anchors), researchPack.sourceGate);
-    assertCanonicalSourceGate(researchPack.sourceGate, persistedGate);
+    assertSameSourceGate(researchPack.sourceGate, persistedGate);
     if (!researchPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows angle generation");
     const anglesRaw = await options.generation.angles({ job: job.input, researchPack, signal: execution.controller.signal });
-    const angles = validateEditorialAngleCandidates(anglesRaw, researchPack.anchors);
+    const angles = validateEditorialAngleCandidates(anglesRaw, approvedResearchAnchors(researchPack));
     const anglesRef = await writeJsonArtifact(job.id, "angles.json", angles, execution, "source_gate");
     const current = await addArtifact(job.id, anglesRef, "source_gate");
     return options.store.transition(current.id, "awaiting_angle", {}, { revision: current.revision, state: "source_gate" });
@@ -351,8 +351,8 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const formats = await readArtifact(job.id, "formats.json", EditorialFormatsSchema.parse);
     validateEditorialEvidence(researchPack, draft, diagnosis);
     const qa = EditorialQaSchema.parse(options.generation.qa
-      ? await options.generation.qa({ job: job.input, researchPack, draft, formats, signal: execution.controller.signal })
-      : evaluateEditorialQa(researchPack, draft, formats));
+      ? await options.generation.qa({ job: job.input, researchPack, diagnosis, draft, formats, signal: execution.controller.signal })
+      : evaluateEditorialQa(researchPack, draft, formats, diagnosis));
     const qaRef = await writeJsonArtifact(job.id, "qa.json", qa, execution, "qa");
     const current = await completeStage(job.id, "qa", qaRef);
     return options.store.transition(current.id, "awaiting_final_approval", {}, { revision: current.revision, state: "qa" });
@@ -651,11 +651,11 @@ export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGener
     async formats({ draft, diagnosis, signal }) {
       return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: formats. Return the six derivatives and exactly ten publication slides JSON.` }, { role: "user", content: buildFormatsPrompt(draft, diagnosis) }], schema: EditorialFormatsSchema, signal });
     },
-    async qa({ researchPack, draft, formats, signal }) {
+    async qa({ researchPack, diagnosis, draft, formats, signal }) {
       const localEditorialViolations = detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation);
       const localFormatsViolations = detectFormatsSlop(formats).map(formatSlopViolation);
-      const modelEditorialLint = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft) }], schema: EditorialLintQaSchema, signal }));
-      const modelFormatsLint = parseQaResult(FormatsLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured formats QA. Return only the fixed structured formats QA JSON.` }, { role: "user", content: buildFormatsQaPrompt(draft, formats) }], schema: FormatsLintQaSchema, signal }));
+      const modelEditorialLint = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft, diagnosis) }], schema: EditorialLintQaSchema, signal }));
+      const modelFormatsLint = parseQaResult(FormatsLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured formats QA. Return only the fixed structured formats QA JSON.` }, { role: "user", content: buildFormatsQaPrompt(draft, formats, diagnosis) }], schema: FormatsLintQaSchema, signal }));
       const editorialLint = EditorialLintQaSchema.parse({
         ...modelEditorialLint,
         pass: modelEditorialLint.pass && localEditorialViolations.length === 0,
@@ -702,9 +702,9 @@ function buildDeterministicResearchPack(input: EditorialJobInput, collection: Ed
   return EditorialResearchPackSchema.parse({ topic, context: input.context, summary: generated.summary, anchors, sourceGate });
 }
 
-function evaluateEditorialQa(researchPack: EditorialResearchPack, draft: EditorialDraft, _formats: EditorialFormats): EditorialQa {
-  const missing = evidenceViolations(researchPack, draft, undefined);
-  const anchors = researchPack.anchors.map((anchor) => canonicalEditorialUrl(anchor.sourceUrl));
+function evaluateEditorialQa(researchPack: EditorialResearchPack, draft: EditorialDraft, _formats: EditorialFormats, diagnosis: EditorialDiagnosis): EditorialQa {
+  const missing = evidenceViolations(researchPack, draft, diagnosis);
+  const anchors = approvedResearchAnchors(researchPack).map((anchor) => canonicalEditorialUrl(anchor.sourceUrl));
   return EditorialQaSchema.parse({
     passed: missing.length === 0,
     warnings: missing,
@@ -720,7 +720,7 @@ function combinedEditorialQa(researchPack: EditorialResearchPack, draft: Editori
     passed,
     warnings: [...evidenceWarnings, ...qaWarnings(editorialLint, "Editorial QA"), ...qaWarnings(formatsLint, "Formats QA")].slice(0, 50),
     checkedClaims: draft.claims.length,
-    sourceUrls: researchPack.anchors.map((anchor) => canonicalEditorialUrl(anchor.sourceUrl)),
+    sourceUrls: approvedResearchAnchors(researchPack).map((anchor) => canonicalEditorialUrl(anchor.sourceUrl)),
     editorialLint,
     formatsLint,
   });
@@ -809,6 +809,14 @@ function toSourceGateAnchor(anchor: EditorialResearchAnchor): SourceGateAnchor {
   return { sourceName: anchor.sourceName, sourceUrl: anchor.sourceUrl, sourceType: anchor.sourceType, confirmedClaims: anchor.confirmedClaims, unconfirmedClaims: anchor.unconfirmedClaims, interpretationRisk: anchor.interpretationRisk };
 }
 
+function approvedResearchAnchors(researchPack: EditorialResearchPack): EditorialResearchAnchor[] {
+  const approvedUrls = new Set(
+    selectApprovedSourceGateAnchors(researchPack.sourceGate.anchors)
+      .map((anchor) => canonicalEditorialUrl(anchor.sourceUrl)),
+  );
+  return researchPack.anchors.filter((anchor) => approvedUrls.has(canonicalEditorialUrl(anchor.sourceUrl)));
+}
+
 function selectDeterministicEvidenceAnchors(anchors: readonly EditorialResearchAnchor[]): EditorialResearchAnchor[] {
   const origins = new Set<string>();
   return anchors.filter((anchor) => {
@@ -821,7 +829,7 @@ function selectDeterministicEvidenceAnchors(anchors: readonly EditorialResearchA
 }
 
 function evidenceViolations(researchPack: EditorialResearchPack, draft: EditorialDraft | undefined, diagnosis: EditorialDiagnosis | undefined): string[] {
-  const anchors = new Set(researchPack.anchors.map((anchor) => canonicalEditorialUrl(anchor.sourceUrl)));
+  const anchors = new Set(approvedResearchAnchors(researchPack).map((anchor) => canonicalEditorialUrl(anchor.sourceUrl)));
   const warnings: string[] = [];
   if (draft) {
     for (const claim of draft.claims) {
@@ -848,6 +856,15 @@ function calculateCanonicalSourceGate(input: EditorialJobInput, anchors: readonl
 }
 
 function assertCanonicalSourceGate(expected: EditorialResearchPack["sourceGate"], persisted: EditorialResearchPack["sourceGate"]): void {
+  const expectedWithPersistedDecision = {
+    ...expected,
+    pass: persisted.pass,
+    diagnosisAllowed: persisted.diagnosisAllowed,
+  };
+  if (stableJson(expectedWithPersistedDecision) !== stableJson(persisted)) throw new Error("The persisted source gate changed before promotion");
+}
+
+function assertSameSourceGate(expected: EditorialResearchPack["sourceGate"], persisted: EditorialResearchPack["sourceGate"]): void {
   if (stableJson(expected) !== stableJson(persisted)) throw new Error("The persisted source gate changed before promotion");
 }
 

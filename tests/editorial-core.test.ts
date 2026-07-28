@@ -12,7 +12,7 @@ import { EditorialJobInputSchema, assertEditorialJobTransition } from "../src/sc
 import { createDeepSeekGeneration, createEditorialRunner, createFirecrawlCollector, isLikelyNavigationOrPolicyUrl, MAX_PRODUCTION_ANCHOR_TEXT_BYTES, MAX_PRODUCTION_DISCOVERY_SOURCES, MAX_PRODUCTION_SOURCE_TEXT_BYTES } from "../src/editorial/run-editorial-job.js";
 import { createPackageWriter } from "../src/editorial/package-writer.js";
 import { detectEditorialSlop } from "../src/editorial/no-ai-slop.js";
-import { buildAnglesPrompt, buildDiagnosisPrompt, buildDraftPrompt, buildEditorialQaPrompt, EDITORIAL_NO_SLOP_CRITERIA, EDITORIAL_VOICE, serializeUntrusted } from "../src/editorial/prompts.js";
+import { buildAnglesPrompt, buildDiagnosisPrompt, buildDraftPrompt, buildEditorialQaPrompt, buildFormatsQaPrompt, EDITORIAL_NO_SLOP_CRITERIA, EDITORIAL_VOICE, serializeUntrusted } from "../src/editorial/prompts.js";
 import { assertPublicHttpUrl } from "../src/security/public-host.js";
 import { EditorialAngleCandidatesSchema, EditorialDiagnosisSchema, EditorialDraftSchema, EditorialFormatsSchema, EditorialResearchPackSchema } from "../src/schemas/editorial-generation.js";
 import { PublicationSlideSchema } from "../src/schemas/publication.js";
@@ -23,7 +23,8 @@ const input = { kind: "topic" as const, topic: "Tema de teste", context: "", out
 function tempName(prefix: string): Promise<string> { return mkdtemp(path.join(tmpdir(), prefix)); }
 
 function anchors() {
-  return ["one.example", "two.example", "three.example"].map((host) => ({ sourceName: host, sourceUrl: `https://${host}/source`, sourceType: "official" as const, title: host, text: "Fonte", confirmedClaims: ["claim"], unconfirmedClaims: [], interpretationRisk: "No obvious interpretation risk." }));
+  const sourceTypes = ["official", "journalistic", "technical"] as const;
+  return ["one.example", "two.example", "three.example"].map((host, index) => ({ sourceName: host, sourceUrl: `https://${host}/source`, sourceType: sourceTypes[index]!, title: host, text: "Fonte", confirmedClaims: ["claim"], unconfirmedClaims: [], interpretationRisk: "No obvious interpretation risk." }));
 }
 
 function slides() {
@@ -122,22 +123,65 @@ describe("editorial control-plane contracts", () => {
   it("keeps raw source prose out of downstream generation and separates positive voice from anti-slop QA", () => {
     const generated = generation();
     const sentinel = "RAW_SOURCE_PROSE_SENTINEL";
+    const unapprovedAnchor = {
+      sourceName: "unconfirmed.example",
+      sourceUrl: "https://unconfirmed.example/source",
+      sourceType: "other" as const,
+      title: "Unconfirmed source",
+      text: sentinel,
+      confirmedClaims: [],
+      unconfirmedClaims: ["Unconfirmed source claim"],
+      interpretationRisk: "Needs confirmation.",
+    };
+    const diagnosis = EditorialDiagnosisSchema.parse({
+      ...generated.diagnosis,
+      ledger: [
+        ...generated.diagnosis.ledger,
+        { statement: "A distribuição pode concentrar-se no operador.", classification: "INFERÊNCIA", sourceUrls: [], rationale: "Leitura derivada do mecanismo." },
+        { statement: "O operador pode fechar o circuito no próximo ciclo.", classification: "HIPÓTESE", sourceUrls: [], rationale: "Hipótese para testar." },
+      ],
+    });
     const research = EditorialResearchPackSchema.parse({
       ...generated.research,
-      anchors: generated.research.anchors.map((anchor) => ({ ...anchor, text: sentinel })),
+      anchors: [...generated.research.anchors.map((anchor) => ({ ...anchor, text: sentinel })), unapprovedAnchor],
+      sourceGate: {
+        ...generated.research.sourceGate,
+        anchors: [
+          ...generated.research.sourceGate.anchors,
+          {
+            sourceName: unapprovedAnchor.sourceName,
+            sourceUrl: unapprovedAnchor.sourceUrl,
+            sourceType: unapprovedAnchor.sourceType,
+            confirmedClaims: unapprovedAnchor.confirmedClaims,
+            unconfirmedClaims: unapprovedAnchor.unconfirmedClaims,
+            interpretationRisk: unapprovedAnchor.interpretationRisk,
+          },
+        ],
+      },
     });
     const generationPrompts = [
       buildAnglesPrompt(research),
       buildDiagnosisPrompt(research, generated.angles.candidates[0]!),
-      buildDraftPrompt(research, generated.diagnosis),
+      buildDraftPrompt(research, diagnosis),
     ];
     for (const prompt of generationPrompts) assert.equal(prompt.includes(sentinel), false);
+    for (const prompt of generationPrompts) assert.equal(prompt.includes(unapprovedAnchor.sourceUrl), false);
     const draftPrompt = generationPrompts[2]!;
     assert.equal(draftPrompt.split(EDITORIAL_VOICE).length - 1, 1);
     assert.equal(draftPrompt.includes(EDITORIAL_NO_SLOP_CRITERIA), false);
-    const qaPrompt = buildEditorialQaPrompt(research, generated.draft);
+    assert.match(draftPrompt, /Preserve every INFERÊNCIA and HIPÓTESE as interpretation/iu);
+    assert.match(draftPrompt, /A distribuição pode concentrar-se no operador/iu);
+    assert.match(draftPrompt, /O operador pode fechar o circuito no próximo ciclo/iu);
+    const qaPrompt = buildEditorialQaPrompt(research, generated.draft, diagnosis);
+    const formatsQaPrompt = buildFormatsQaPrompt(generated.draft, generated.formats, diagnosis);
     assert.equal(qaPrompt.includes(sentinel), false);
+    assert.equal(qaPrompt.includes(unapprovedAnchor.sourceUrl), false);
     assert.equal(qaPrompt.includes(EDITORIAL_NO_SLOP_CRITERIA), true);
+    assert.match(qaPrompt, /label=diagnosis/iu);
+    assert.match(qaPrompt, /Verify that every INFERÊNCIA and HIPÓTESE remains qualified/iu);
+    assert.match(qaPrompt, /A distribuição pode concentrar-se no operador/iu);
+    assert.equal(formatsQaPrompt.includes(unapprovedAnchor.sourceUrl), false);
+    assert.match(formatsQaPrompt, /label=diagnosis/iu);
   });
 
   it("rejects reserved DNS results through an injectable public-host resolver", async () => {
@@ -802,6 +846,8 @@ describe("production DeepSeek QA", () => {
       assert.match(formatsQaCall, /exactly ten publication slides are required/iu);
       assert.match(formatsQaCall, /do not require sourceUrls on format strings or slide objects/iu);
       assert.match(formatsQaCall, /do not fail merely because the accepted source gate contains three anchors/iu);
+      const editorialQaCall = result.calls.find((call) => call.includes("fixed structured editorial QA")) ?? "";
+      assert.match(editorialQaCall, /label=diagnosis/iu);
       assert.equal(result.calls.filter((call) => call.includes("fixed structured editorial QA")).length, 1);
       assert.equal(result.calls.filter((call) => call.includes("fixed structured formats QA")).length, 1);
       const store = createJobStore({ rootDir: path.join(root, "jobs") });
@@ -829,6 +875,7 @@ describe("production DeepSeek QA", () => {
     const result = await qa({
       job: input,
       researchPack: generated.research,
+      diagnosis: generated.diagnosis,
       draft: EditorialDraftSchema.parse({
         ...generated.draft,
         bodyMarkdown: "A pergunta não é se o modelo funciona. A pergunta é quem fica com a distribuição.",

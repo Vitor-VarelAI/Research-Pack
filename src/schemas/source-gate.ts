@@ -48,6 +48,50 @@ export const SourceGateUnsupportedClaimSchema = z.object({
 });
 export type SourceGateUnsupportedClaim = z.infer<typeof SourceGateUnsupportedClaimSchema>;
 
+export const NON_SENSITIVE_MIN_ANCHORS = 3;
+export const SENSITIVE_MIN_ANCHORS = 4;
+
+/**
+ * Return the anchors the gate can approve for downstream factual/editorial use.
+ *
+ * An anchor without a confirmed claim may remain in the gate artifact as
+ * provenance, but it cannot support downstream facts or count toward the gate.
+ */
+export function selectApprovedSourceGateAnchors(
+  anchors: readonly SourceGateAnchor[],
+): SourceGateAnchor[] {
+  return anchors.filter((anchor) => anchor.confirmedClaims.length > 0);
+}
+
+function deriveSourceGateState(
+  anchors: readonly SourceGateAnchor[],
+  sensitiveCategories: readonly SensitiveCategory[],
+): {
+  minimumAnchorsFound: number;
+  needsExtraAnchor: boolean;
+  pass: boolean;
+} {
+  const countedAnchors = selectApprovedSourceGateAnchors(anchors);
+  const sourceTypes = new Set(countedAnchors.map((anchor) => anchor.sourceType));
+  const needsExtraAnchor = sensitiveCategories.length > 0;
+  const requiredAnchors = needsExtraAnchor ? SENSITIVE_MIN_ANCHORS : NON_SENSITIVE_MIN_ANCHORS;
+  const hasRequiredDiversity =
+    sourceTypes.has("official")
+    && sourceTypes.has("journalistic")
+    && (
+      sourceTypes.has("technical")
+      || sourceTypes.has("policy")
+      || sourceTypes.has("market")
+    );
+  const minimumAnchorsFound = countedAnchors.length;
+
+  return {
+    minimumAnchorsFound,
+    needsExtraAnchor,
+    pass: minimumAnchorsFound >= requiredAnchors && hasRequiredDiversity,
+  };
+}
+
 export const SourceGateResultSchema = z.object({
   pass: z.boolean(),
   minimumAnchorsFound: z.number().int().nonnegative(),
@@ -58,20 +102,19 @@ export const SourceGateResultSchema = z.object({
   diagnosisAllowed: z.boolean(),
   notes: z.string().default(""),
 }).superRefine((result, ctx) => {
-  const actualAnchorCount = result.anchors.length;
-  const actualNeedsExtraAnchor = result.sensitiveCategories.length > 0;
-  const requiredAnchors = actualNeedsExtraAnchor ? SENSITIVE_MIN_ANCHORS : NON_SENSITIVE_MIN_ANCHORS;
-  const actualPass = actualAnchorCount >= requiredAnchors;
+  const minimumAnchorsFound = selectApprovedSourceGateAnchors(result.anchors).length;
+  const needsExtraAnchor = result.sensitiveCategories.length > 0;
+  const requiredAnchors = needsExtraAnchor ? SENSITIVE_MIN_ANCHORS : NON_SENSITIVE_MIN_ANCHORS;
 
-  if (result.minimumAnchorsFound !== actualAnchorCount) {
+  if (result.minimumAnchorsFound !== minimumAnchorsFound) {
     ctx.addIssue({
       code: "custom",
       path: ["minimumAnchorsFound"],
-      message: `minimumAnchorsFound must equal anchors.length (${actualAnchorCount})`,
+      message: `minimumAnchorsFound must equal the number of anchors with confirmed claims (${minimumAnchorsFound})`,
     });
   }
 
-  if (result.needsExtraAnchor !== actualNeedsExtraAnchor) {
+  if (result.needsExtraAnchor !== needsExtraAnchor) {
     ctx.addIssue({
       code: "custom",
       path: ["needsExtraAnchor"],
@@ -79,26 +122,23 @@ export const SourceGateResultSchema = z.object({
     });
   }
 
-  if (result.pass !== actualPass) {
+  if (result.pass && minimumAnchorsFound < requiredAnchors) {
     ctx.addIssue({
       code: "custom",
       path: ["pass"],
-      message: `pass must be ${actualPass} for ${actualAnchorCount} anchors and required minimum ${requiredAnchors}`,
+      message: `pass cannot be true with ${minimumAnchorsFound} counted anchors; required minimum is ${requiredAnchors}`,
     });
   }
 
-  if (result.diagnosisAllowed !== actualPass) {
+  if (result.diagnosisAllowed !== result.pass) {
     ctx.addIssue({
       code: "custom",
       path: ["diagnosisAllowed"],
-      message: "diagnosisAllowed must match the derived source sufficiency pass value",
+      message: "diagnosisAllowed must match pass",
     });
   }
 });
 export type SourceGateResult = z.infer<typeof SourceGateResultSchema>;
-
-export const NON_SENSITIVE_MIN_ANCHORS = 3;
-export const SENSITIVE_MIN_ANCHORS = 4;
 
 /**
  * Evaluate source sufficiency from raw anchor data and detected sensitive
@@ -115,19 +155,16 @@ export function evaluateSourceGate(input: {
   notes?: string;
 }): SourceGateResult {
   const sensitive = input.sensitiveCategories ?? [];
-  const needsExtraAnchor = sensitive.length > 0;
-  const required = needsExtraAnchor ? SENSITIVE_MIN_ANCHORS : NON_SENSITIVE_MIN_ANCHORS;
-  const found = input.anchors.length;
-  const passed = found >= required;
+  const derived = deriveSourceGateState(input.anchors, sensitive);
 
   return SourceGateResultSchema.parse({
-    pass: passed,
-    minimumAnchorsFound: found,
-    needsExtraAnchor,
+    pass: derived.pass,
+    minimumAnchorsFound: derived.minimumAnchorsFound,
+    needsExtraAnchor: derived.needsExtraAnchor,
     sensitiveCategories: sensitive,
     anchors: input.anchors,
     unsupportedClaims: input.unsupportedClaims ?? [],
-    diagnosisAllowed: passed,
+    diagnosisAllowed: derived.pass,
     notes: input.notes ?? "",
   });
 }

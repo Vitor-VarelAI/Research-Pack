@@ -239,6 +239,42 @@ test("incomplete structured QA remains undecided in the safe review model", asyn
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("safe review exposes at most five deduplicated and sanitized qa warnings", async () => {
+  const root = await tempRoot();
+  const store = createJobStore({ rootDir: join(root, "control", "jobs") });
+  try {
+    const job = await store.create(input);
+    await store.writeArtifact(job.id, "draft.json", JSON.stringify({ title: "Draft", description: "Descrição", bodyMarkdown: "# Draft", claims: [] }));
+    const themes = ["ink", "paper", "blue", "sand", "red", "paper", "blue", "sand", "red", "ink"];
+    await store.writeArtifact(job.id, "formats.json", JSON.stringify({ newsletter: "N", linkedin: "L", xThread: "X", shortVideoIdeas: "V", carousel: "C", titlesHooks: "T", slides: themes.map((theme, index) => ({ id: `slide-${index}`, eyebrow: "E", title: "T", bodyMarkdown: "B", theme, ...(index === 0 || index === 4 ? { stat: { value: String(index), label: "valor" } } : {}) })) }));
+    await store.writeArtifact(job.id, "qa.json", JSON.stringify({
+      passed: false,
+      warnings: [
+        "Aviso repetido",
+        "Aviso repetido",
+        "https://user:password@example.com/private",
+        "/tmp/private/output.json",
+        "Aviso seis",
+        "Aviso sete",
+        "Aviso oito",
+      ],
+      checkedClaims: 0,
+      sourceUrls: [],
+      editorialLint: { pass: false, model_verdict: "HOLD", violations: [], sourceRisks: [], rhythmRisks: [] },
+      formatsLint: { pass: false, model_verdict: "HOLD", violations: [], sourceRisks: [], rhythmRisks: [] },
+    }));
+
+    const review = (await toSafeJob(store, job)).review;
+    assert.ok(review);
+    assert.equal(review.qaWarnings.length, 5);
+    assert.deepEqual(review.qaWarnings.slice(0, 2), ["Aviso repetido", "[URL omitido]"]);
+    assert.equal(new Set(review.qaWarnings).size, review.qaWarnings.length);
+    assert.equal(review.qaWarnings.some((warning) => /password|token=remove|\/tmp\/private/u.test(warning)), false);
+    assert.equal(review.qaWarnings.includes("Aviso oito"), false);
+    assert.equal(JSON.stringify(review).includes("editorialLint"), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("approval failures return a safe error instead of an optimistic 202", async () => {
   const root = await tempRoot();
   const store = createJobStore({ rootDir: join(root, "control", "jobs") });

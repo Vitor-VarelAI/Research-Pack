@@ -14,6 +14,7 @@ import {
   type EditorialJobInput,
   type EditorialJobStage,
   type EditorialJobState,
+  redactSensitiveText,
 } from "../schemas/editorial-job.js";
 import {
   createProductionEditorialRunner,
@@ -57,6 +58,15 @@ export type SafeStage = {
   artifactKinds: string[];
 };
 
+export type SafeReview = {
+  title: string;
+  description: string;
+  qaVerdict: "PASS" | "HOLD" | "REVIEW" | "SEM DECISÃO";
+  qaWarnings: string[];
+  formatCount: number;
+  slideCount: number;
+};
+
 export type SafeJob = {
   id: string;
   state: EditorialJobState;
@@ -67,7 +77,7 @@ export type SafeJob = {
   selectedAngle: { id: string; title: string; thesis: string } | null;
   error: { code: string; stage: string | null; message: string } | null;
   angles: Array<{ id: string; title: string; thesis: string; whyNow: string; evidenceCount: number }>;
-  review: { title: string; description: string; qaVerdict: "PASS" | "HOLD" | "REVIEW" | "SEM DECISÃO"; qaWarnings: number; formatCount: number; slideCount: number } | null;
+  review: SafeReview | null;
   packageSlug: string | null;
   rejectionNote: string | null;
 };
@@ -378,10 +388,23 @@ async function readReview(store: JobStore, id: string): Promise<SafeJob["review"
         : qa.passed && qa.editorialLint?.pass === true && qa.formatsLint?.pass === true && editorialVerdict === "PASS" && formatsVerdict === "PASS"
           ? "PASS"
           : "HOLD";
-    return { title: safeText(draft.title, 300), description: safeText(draft.description, 1_000), qaVerdict, qaWarnings: qa.warnings.length, formatCount: 7, slideCount: formats.slides.length };
+    return { title: safeText(draft.title, 300), description: safeText(draft.description, 1_000), qaVerdict, qaWarnings: safeQaWarnings(qa.warnings), formatCount: 7, slideCount: formats.slides.length };
   } catch {
     return null;
   }
+}
+
+function safeQaWarnings(warnings: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const safeWarnings: string[] = [];
+  for (const warning of warnings) {
+    const safe = safeText(redactSensitiveText(warning, 500), 500).replace(/https?:\/\/[^\s<>"']+/giu, "[URL omitido]").trim();
+    if (!safe || seen.has(safe)) continue;
+    seen.add(safe);
+    safeWarnings.push(safe);
+    if (safeWarnings.length === 5) break;
+  }
+  return safeWarnings;
 }
 
 function packageSlug(job: EditorialJob): string | null {
