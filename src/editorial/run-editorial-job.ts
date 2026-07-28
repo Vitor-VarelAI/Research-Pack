@@ -137,6 +137,9 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
   async function selectAngleUnlocked(jobId: string, angleId: string): Promise<EditorialJob> {
     const job = await options.store.get(jobId);
     if (job.state !== "awaiting_angle") throw new Error(`Angle selection requires awaiting_angle, received ${job.state}`);
+    const researchPack = await readArtifact(jobId, "research-pack.json", EditorialResearchPackSchema.parse);
+    const persistedGate = await readArtifact(jobId, "source-gate.json", SourceGateResultSchema.parse);
+    assertUsableSourceGate(job.input, researchPack, persistedGate);
     const angles = await readArtifact<EditorialAngleCandidates>(jobId, "angles.json", EditorialAngleCandidatesSchema.parse);
     const selected = angles.candidates.find((candidate) => candidate.id === angleId);
     if (!selected) throw new Error("Unknown editorial angle");
@@ -170,16 +173,12 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const qa = await readArtifact(jobId, "qa.json", EditorialQaSchema.parse);
     const persistedGate = await readArtifact(jobId, "source-gate.json", SourceGateResultSchema.parse);
     validateEditorialEvidence(researchPack, draft, diagnosis);
-    assertCanonicalSourceGate(calculateCanonicalSourceGate(job.input, researchPack.anchors), researchPack.sourceGate);
-    assertSameSourceGate(researchPack.sourceGate, persistedGate);
-    if (!researchPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows promotion");
+    assertUsableSourceGate(job.input, researchPack, persistedGate);
     const latest = await options.store.get(jobId);
     if (latest.state !== "awaiting_final_approval" || latest.revision !== job.revision) throw new Error("Editorial job changed before promotion");
     const finalPack = await readArtifact(jobId, "research-pack.json", EditorialResearchPackSchema.parse);
     const finalGate = await readArtifact(jobId, "source-gate.json", SourceGateResultSchema.parse);
-    assertCanonicalSourceGate(calculateCanonicalSourceGate(latest.input, finalPack.anchors), finalPack.sourceGate);
-    assertSameSourceGate(finalPack.sourceGate, finalGate);
-    if (!finalPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows promotion");
+    assertUsableSourceGate(latest.input, finalPack, finalGate);
     const result = await options.packageWriter.write({ job: latest, researchPack: finalPack, angles, diagnosis, draft, formats, qa });
     const publicationRef = { kind: "publication", path: `editorial/${result.slug}/publication.json`, createdAt: new Date().toISOString() };
     try {
@@ -246,13 +245,32 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
   async function retryUnlocked(jobId: string): Promise<EditorialJob> {
     const job = await options.store.get(jobId);
     if (job.state !== "failed" && job.state !== "interrupted") throw new Error(`Retry requires failed or interrupted, received ${job.state}`);
-    const target = retryStage(job);
+    let target = retryStage(job);
+    let retryStageSummaries = target === "source_gate" ? job.stageSummaries : stageRunning(job.stageSummaries, target);
+    if (job.failedStage === "source_gate" && job.error?.code === "source_gate_blocked") {
+      try {
+        const researchPack = await readArtifact(jobId, "research-pack.json", EditorialResearchPackSchema.parse);
+        const persistedGate = await readArtifact(jobId, "source-gate.json", SourceGateResultSchema.parse);
+        assertUsableSourceGate(job.input, researchPack, persistedGate);
+        target = "source_gate";
+        retryStageSummaries = {
+          ...job.stageSummaries,
+          source_gate: {
+            ...job.stageSummaries.source_gate,
+            status: "completed",
+            warning: sourceGateAdvisoryWarning(researchPack.sourceGate),
+          },
+        };
+      } catch {
+        // Missing, invalid or unconfirmed legacy evidence must repeat research.
+      }
+    }
     const execution = beginExecution(jobId);
     try {
       const current = await options.store.transition(jobId, target, {
         error: null,
         failedStage: null,
-        stageSummaries: target === "source_gate" ? job.stageSummaries : stageRunning(job.stageSummaries, target),
+        stageSummaries: retryStageSummaries,
       }, { revision: job.revision, state: job.state });
       if (target === "researching") return await executeResearch(current, execution);
       if (target === "source_gate") return await executeAngles(current, execution);
@@ -286,13 +304,14 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     current = await options.store.transition(job.id, "source_gate", { stageSummaries: stageRunning(current.stageSummaries, "source_gate") }, { revision: current.revision, state: "researching" });
     const gate = researchPack.sourceGate;
     const gateRef = await writeJsonArtifact(job.id, "source-gate.json", gate, execution, "source_gate");
-    if (!gate.diagnosisAllowed) {
+    if (approvedResearchAnchors(researchPack).length === 0) {
       const blockedSummary = { ...current.stageSummaries.source_gate, status: "blocked" as const, finishedAt: new Date().toISOString(), artifacts: [...current.stageSummaries.source_gate.artifacts, gateRef] };
       current = await options.store.update(current.id, { artifacts: [...current.artifacts, gateRef], stageSummaries: { ...current.stageSummaries, source_gate: blockedSummary } }, { revision: current.revision, state: "source_gate" });
-      const error = { code: "source_gate_blocked" as const, stage: "source_gate" as const, message: "Source gate blocked diagnosis because the anchor threshold was not met" };
+      const error = { code: "source_gate_blocked" as const, stage: "source_gate" as const, message: "Source gate bloqueado: zero fontes com claims confirmados" };
       return options.store.transition(current.id, "failed", { error, failedStage: "source_gate" }, { revision: current.revision, state: "source_gate" });
     }
-    current = await completeStage(current.id, "source_gate", gateRef);
+    const warning = sourceGateAdvisoryWarning(gate);
+    current = await completeStage(current.id, "source_gate", gateRef, warning);
     return executeAngles(current, execution, researchPack);
   }
 
@@ -300,9 +319,7 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     assertExecution(job, execution, "source_gate");
     const researchPack = persistedResearchPack ?? await readArtifact(job.id, "research-pack.json", EditorialResearchPackSchema.parse);
     const persistedGate = await readArtifact(job.id, "source-gate.json", SourceGateResultSchema.parse);
-    assertCanonicalSourceGate(calculateCanonicalSourceGate(job.input, researchPack.anchors), researchPack.sourceGate);
-    assertSameSourceGate(researchPack.sourceGate, persistedGate);
-    if (!researchPack.sourceGate.diagnosisAllowed) throw new Error("Editorial source gate no longer allows angle generation");
+    assertUsableSourceGate(job.input, researchPack, persistedGate);
     const anglesRaw = await options.generation.angles({ job: job.input, researchPack, signal: execution.controller.signal });
     const angles = validateEditorialAngleCandidates(anglesRaw, approvedResearchAnchors(researchPack));
     const anglesRef = await writeJsonArtifact(job.id, "angles.json", angles, execution, "source_gate");
@@ -358,10 +375,10 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     return options.store.transition(current.id, "awaiting_final_approval", {}, { revision: current.revision, state: "qa" });
   }
 
-  async function completeStage(jobId: string, stage: EditorialJobStage, ref: { kind: string; path: string; createdAt: string }): Promise<EditorialJob> {
+  async function completeStage(jobId: string, stage: EditorialJobStage, ref: { kind: string; path: string; createdAt: string }, warning: string | null = null): Promise<EditorialJob> {
     const current = await options.store.get(jobId);
     if (current.state !== stage) throw new Error(`Late ${stage} completion was ignored`);
-    const summary = { ...current.stageSummaries[stage], status: "completed" as const, finishedAt: new Date().toISOString(), artifacts: [...current.stageSummaries[stage].artifacts, ref] };
+    const summary = { ...current.stageSummaries[stage], status: "completed" as const, finishedAt: new Date().toISOString(), warning, artifacts: [...current.stageSummaries[stage].artifacts, ref] };
     const stageSummaries = { ...current.stageSummaries, [stage]: summary };
     return options.store.update(jobId, { artifacts: [...current.artifacts, ref], stageSummaries }, { revision: current.revision, state: stage });
   }
@@ -853,6 +870,18 @@ function calculateCanonicalSourceGate(input: EditorialJobInput, anchors: readonl
   const haystack = `${input.kind === "topic" ? input.topic : input.url} ${input.context}`.toLowerCase();
   const sensitiveCategories = SENSITIVE_CATEGORIES.filter((category) => haystack.includes(category.toLowerCase())) as SensitiveCategory[];
   return evaluateSourceGate({ anchors: selectDeterministicEvidenceAnchors(anchors).map(toSourceGateAnchor), sensitiveCategories });
+}
+
+function sourceGateAdvisoryWarning(gate: EditorialResearchPack["sourceGate"]): string | null {
+  return gate.diagnosisAllowed
+    ? null
+    : "HOLD consultivo: o source gate não cumpre quantidade ou diversidade, mas há fontes com claims confirmados; o fluxo continua para escolha e aprovação humana.";
+}
+
+function assertUsableSourceGate(input: EditorialJobInput, researchPack: EditorialResearchPack, persistedGate: EditorialResearchPack["sourceGate"]): void {
+  assertCanonicalSourceGate(calculateCanonicalSourceGate(input, researchPack.anchors), researchPack.sourceGate);
+  assertSameSourceGate(researchPack.sourceGate, persistedGate);
+  if (approvedResearchAnchors(researchPack).length === 0) throw new Error("Editorial source gate has zero sources with confirmed claims");
 }
 
 function assertCanonicalSourceGate(expected: EditorialResearchPack["sourceGate"], persisted: EditorialResearchPack["sourceGate"]): void {

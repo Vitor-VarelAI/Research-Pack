@@ -390,17 +390,36 @@ describe("mocked runner", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
-  it("blocks diagnosis at the deterministic source gate", async () => {
+  it("keeps a source-diversity HOLD advisory when confirmed journalism exists and allows human approval", async () => {
     const root = await tempName("editorial-gate-");
     try {
       const generated = generation();
+      const journalisticAnchors = generated.research.anchors.map((anchor) => ({ ...anchor, sourceType: "journalistic" as const }));
       const store = createJobStore({ rootDir: path.join(root, "jobs") });
-      let anglesCalled = false;
-      const runner = createEditorialRunner({ store, collector: { collect: async () => ({ anchors: generated.research.anchors.slice(0, 2) }) }, generation: { research: async () => generated.research, angles: async () => { anglesCalled = true; return generated.angles; }, diagnosis: async () => generated.diagnosis, draft: async () => generated.draft, formats: async () => generated.formats }, packageWriter: createPackageWriter(root) });
-      const failed = await runner.start(input);
-      assert.equal(failed.state, "failed");
-      assert.equal(failed.error?.code, "source_gate_blocked");
-      assert.equal(anglesCalled, false);
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => ({ anchors: journalisticAnchors }) },
+        generation: {
+          research: async () => ({ ...generated.research, anchors: journalisticAnchors }),
+          angles: async () => generated.angles,
+          diagnosis: async () => generated.diagnosis,
+          draft: async () => generated.draft,
+          formats: async () => generated.formats,
+          qa: async () => ({ ...generatedQa(generated), passed: false, editorialLint: qaCheck(true, "HOLD") }),
+        },
+        packageWriter: createPackageWriter(root),
+      });
+      const awaitingAngle = await runner.start(input);
+      assert.equal(awaitingAngle.state, "awaiting_angle");
+      assert.equal(awaitingAngle.stageSummaries.source_gate.status, "completed");
+      assert.match(awaitingAngle.stageSummaries.source_gate.warning ?? "", /HOLD.*consultivo.*aprovação humana/iu);
+      const persistedGate = JSON.parse(await store.readArtifact(awaitingAngle.id, "source-gate.json")) as { pass: boolean; diagnosisAllowed: boolean; minimumAnchorsFound: number };
+      assert.equal(persistedGate.pass, false);
+      assert.equal(persistedGate.diagnosisAllowed, false);
+      assert.equal(persistedGate.minimumAnchorsFound, 3);
+      const awaitingApproval = await runner.selectAngle(awaitingAngle.id, "angle-1");
+      assert.equal(awaitingApproval.state, "awaiting_final_approval");
+      assert.equal((await runner.approve(awaitingApproval.id)).state, "completed");
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -436,6 +455,63 @@ describe("mocked runner", () => {
       assert.equal(collectionCalls, 1);
       assert.equal(researchCalls, 1);
       assert.equal(angleCalls, 2);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
+  it("retries a legacy source_gate_blocked HOLD from persisted confirmed sources without repeating collection or research", async () => {
+    const root = await tempName("editorial-legacy-gate-retry-");
+    try {
+      const generated = generation();
+      const journalisticAnchors = generated.research.anchors.map((anchor) => ({ ...anchor, sourceType: "journalistic" as const }));
+      const sourceGate = {
+        ...generated.research.sourceGate,
+        pass: false,
+        diagnosisAllowed: false,
+        minimumAnchorsFound: 3,
+        anchors: journalisticAnchors.map(({ title: _title, text: _text, ...anchor }) => anchor),
+      };
+      const researchPack = EditorialResearchPackSchema.parse({ ...generated.research, anchors: journalisticAnchors, sourceGate });
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      const created = await store.create(input);
+      const researching = await store.transition(created.id, "researching", {}, { revision: created.revision, state: "queued" });
+      const gated = await store.transition(created.id, "source_gate", {}, { revision: researching.revision, state: "researching" });
+      const researchRef = await store.writeArtifact(created.id, "research-pack.json", `${JSON.stringify(researchPack)}\n`);
+      const gateRef = await store.writeArtifact(created.id, "source-gate.json", `${JSON.stringify(sourceGate)}\n`);
+      const persisted = await store.update(created.id, {
+        artifacts: [researchRef, gateRef],
+        stageSummaries: {
+          ...gated.stageSummaries,
+          researching: { ...gated.stageSummaries.researching, status: "completed", finishedAt: researchRef.createdAt, artifacts: [researchRef] },
+          source_gate: { ...gated.stageSummaries.source_gate, status: "blocked", finishedAt: gateRef.createdAt, artifacts: [gateRef] },
+        },
+      }, { revision: gated.revision, state: "source_gate" });
+      const failed = await store.transition(created.id, "failed", {
+        error: { code: "source_gate_blocked", stage: "source_gate", message: "Source gate blocked diagnosis because the anchor threshold was not met" },
+        failedStage: "source_gate",
+      }, { revision: persisted.revision, state: "source_gate" });
+      let collectionCalls = 0;
+      let researchCalls = 0;
+      let angleCalls = 0;
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => { collectionCalls += 1; return { anchors: [] }; } },
+        generation: {
+          research: async () => { researchCalls += 1; return generated.research; },
+          angles: async () => { angleCalls += 1; return generated.angles; },
+          diagnosis: async () => generated.diagnosis,
+          draft: async () => generated.draft,
+          formats: async () => generated.formats,
+        },
+        packageWriter: createPackageWriter(root),
+      });
+
+      const retried = await runner.retry(failed.id);
+      assert.equal(retried.state, "awaiting_angle");
+      assert.equal(retried.stageSummaries.source_gate.status, "completed");
+      assert.match(retried.stageSummaries.source_gate.warning ?? "", /HOLD.*consultivo.*aprovação humana/iu);
+      assert.equal(collectionCalls, 0);
+      assert.equal(researchCalls, 0);
+      assert.equal(angleCalls, 1);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
@@ -803,6 +879,8 @@ describe("production Firecrawl collector", () => {
       const failed = await runner.start(input);
       assert.equal(failed.state, "failed");
       assert.equal(failed.error?.code, "source_gate_blocked");
+      assert.match(failed.error?.message ?? "", /zero fontes com claims confirmados/iu);
+      assert.doesNotMatch(failed.error?.message ?? "", /threshold/iu);
       assert.equal(anglesCalled, false);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
