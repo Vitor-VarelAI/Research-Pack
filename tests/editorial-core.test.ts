@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -13,6 +13,7 @@ import { createDeepSeekGeneration, createEditorialRunner, createFirecrawlCollect
 import { createPackageWriter } from "../src/editorial/package-writer.js";
 import { detectEditorialSlop } from "../src/editorial/no-ai-slop.js";
 import { buildAnglesPrompt, buildDiagnosisPrompt, buildDraftPrompt, buildEditorialQaPrompt, buildFormatsQaPrompt, EDITORIAL_NO_SLOP_CRITERIA, EDITORIAL_VOICE, serializeUntrusted } from "../src/editorial/prompts.js";
+import { createWriterProfileLoader } from "../src/editorial/writer-profile.js";
 import { assertPublicHttpUrl } from "../src/security/public-host.js";
 import { EditorialAngleCandidatesSchema, EditorialDiagnosisSchema, EditorialDraftSchema, EditorialFormatsSchema, EditorialResearchPackSchema } from "../src/schemas/editorial-generation.js";
 import { PublicationSlideSchema } from "../src/schemas/publication.js";
@@ -171,7 +172,9 @@ describe("editorial control-plane contracts", () => {
     for (const prompt of generationPrompts) assert.equal(prompt.includes(unapprovedAnchor.sourceUrl), false);
     const draftPrompt = generationPrompts[2]!;
     assert.equal(draftPrompt.split(EDITORIAL_VOICE).length - 1, 1);
-    assert.equal(draftPrompt.includes(EDITORIAL_NO_SLOP_CRITERIA), false);
+    assert.equal(draftPrompt.includes(EDITORIAL_NO_SLOP_CRITERIA), true);
+    assert.match(draftPrompt, /Stage: dedicated writer/iu);
+    assert.match(draftPrompt, /três títulos, duas aberturas/iu);
     assert.match(draftPrompt, /Afirma diretamente o enquadramento útil/iu);
     assert.match(draftPrompt, /Não uses dois pontos para encenar uma revelação/iu);
     assert.match(draftPrompt, /Não uses perguntas retóricas com resposta imediata/iu);
@@ -189,6 +192,26 @@ describe("editorial control-plane contracts", () => {
     assert.match(qaPrompt, /A distribuição pode concentrar-se no operador/iu);
     assert.equal(formatsQaPrompt.includes(unapprovedAnchor.sourceUrl), false);
     assert.match(formatsQaPrompt, /label=diagnosis/iu);
+  });
+
+  it("loads the private voice and public writing method into one cached writer profile", async () => {
+    const root = await tempName("writer-profile-");
+    try {
+      const privateDir = path.join(root, "private");
+      const methodFile = path.join(root, "blog-post.md");
+      await mkdir(privateDir, { recursive: true });
+      await writeFile(path.join(privateDir, "voice.md"), "VOZ PRIVADA\n\nExemplos de tom:\nO timing não é inocente.");
+      await writeFile(path.join(privateDir, "soul.md"), "SOUL PRIVADA\n\n## Voice / como eu falo\nA parte interessante não é o modelo.");
+      await writeFile(methodFile, "MÉTODO DO DRAFT");
+      const load = createWriterProfileLoader({ privateProfileDir: privateDir, methodFile });
+      const profile = await load();
+      assert.match(profile, /VOZ PRIVADA/u);
+      assert.match(profile, /SOUL PRIVADA/u);
+      assert.match(profile, /MÉTODO DO DRAFT/u);
+      assert.doesNotMatch(profile, /O timing não é inocente|A parte interessante não é o modelo/u);
+      await rm(methodFile);
+      assert.equal(await load(), profile);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("rejects reserved DNS results through an injectable public-host resolver", async () => {
@@ -558,6 +581,35 @@ describe("mocked runner", () => {
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 
+  it("keeps draft review and final model QA failures advisory", async () => {
+    const root = await tempName("editorial-qa-provider-advisory-");
+    try {
+      const generated = generation();
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => ({ anchors: generated.research.anchors }) },
+        generation: {
+          research: async () => generated.research,
+          angles: async () => generated.angles,
+          diagnosis: async () => generated.diagnosis,
+          draft: async () => generated.draft,
+          reviewDraft: async () => { throw new Error("editor unavailable"); },
+          formats: async () => generated.formats,
+          qa: async () => { throw new Error("qa unavailable"); },
+        },
+        packageWriter: createPackageWriter(root),
+        logger: { error: () => undefined },
+      });
+      const first = await runner.start(input);
+      const final = await runner.selectAngle(first.id, "angle-1");
+      assert.equal(final.state, "awaiting_final_approval");
+      assert.match(final.stageSummaries.drafting.warning ?? "", /não ficou disponível/iu);
+      assert.match(final.stageSummaries.qa.warning ?? "", /checks locais/iu);
+      assert.equal(JSON.parse(await store.readArtifact(first.id, "draft.json")).bodyMarkdown, generated.draft.bodyMarkdown);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("cancels a delayed stage and ignores its late completion", async () => {
     const root = await tempName("editorial-cancel-");
     try {
@@ -902,8 +954,8 @@ describe("production DeepSeek QA", () => {
       generated.angles,
       generated.diagnosis,
       generated.draft,
-      generated.formats,
       editorialCheck,
+      generated.formats,
       formatsCheck,
     ];
     const store = createJobStore({ rootDir: path.join(root, "jobs") });
@@ -972,6 +1024,55 @@ describe("production DeepSeek QA", () => {
     assert.equal(result.editorialLint?.model_verdict, "HOLD");
     assert.match(result.editorialLint?.violations[0] ?? "", /no-ai-slop:binary_contrast/u);
     assert.equal(calls.length, 2);
+  });
+
+  it("uses the writer profile, revises the draft once before formats and keeps the chosen facts", async () => {
+    const root = await tempName("editorial-writer-revision-");
+    try {
+      const generated = generation();
+      const originalDraft = EditorialDraftSchema.parse({
+        ...generated.draft,
+        bodyMarkdown: "O timing não é inocente. A resposta não é técnica, é política.",
+      });
+      const revisedDraft = EditorialDraftSchema.parse({
+        ...originalDraft,
+        bodyMarkdown: "A investigação chegou durante a disputa regulatória. A decisão sobre acesso aos estados internos cabe a quem controla o produto.",
+      });
+      const initialReview = {
+        ...qaCheck(false, "HOLD"),
+        violations: ["Cortar o setup dramático e afirmar diretamente os factos."],
+        rhythmRisks: ["O fecho funciona como mic-drop."],
+      };
+      const calls: string[] = [];
+      const responses: unknown[] = [
+        { summary: generated.research.summary, anchors: generated.research.anchors.map((anchor) => ({ sourceUrl: anchor.sourceUrl, sourceType: anchor.sourceType, confirmedClaims: anchor.confirmedClaims, unconfirmedClaims: anchor.unconfirmedClaims, interpretationRisk: anchor.interpretationRisk })) },
+        generated.angles,
+        generated.diagnosis,
+        originalDraft,
+        initialReview,
+        revisedDraft,
+        qaCheck(true, "PASS"),
+        generated.formats,
+        qaCheck(true, "PASS"),
+      ];
+      const store = createJobStore({ rootDir: path.join(root, "jobs") });
+      const runner = createEditorialRunner({
+        store,
+        collector: { collect: async () => ({ anchors: generated.research.anchors, sourceText: "sources" }) },
+        generation: createDeepSeekGeneration(deepSeekMock(responses, calls), { loadWriterProfile: async () => "VOZ PRIVADA DO VITOR\nMÉTODO DO DRAFT" }),
+        packageWriter: createPackageWriter(root),
+      });
+      const first = await runner.start(input);
+      const final = await runner.selectAngle(first.id, "angle-1");
+      assert.equal(final.state, "awaiting_final_approval");
+      assert.equal(JSON.parse(await store.readArtifact(first.id, "draft.json")).bodyMarkdown, revisedDraft.bodyMarkdown);
+      assert.deepEqual(JSON.parse(await store.readArtifact(first.id, "draft.json")).claims, originalDraft.claims);
+      assert.match(calls.find((call) => call.includes("Stage: dedicated writer")) ?? "", /VOZ PRIVADA DO VITOR/u);
+      assert.equal(calls.filter((call) => call.includes("one bounded draft revision")).length, 1);
+      assert.equal(calls.filter((call) => call.includes("pre-format draft editor")).length, 2);
+      assert.match(calls.find((call) => call.includes("Stage: formats.")) ?? "", /A investigação chegou durante a disputa regulatória/u);
+      assert.match(final.stageSummaries.drafting.warning ?? "", /revisão editorial automática única/iu);
+    } finally { await rm(root, { recursive: true, force: true }); }
   });
 
   it("keeps failed and contradictory QA findings advisory and allows human approval", async () => {

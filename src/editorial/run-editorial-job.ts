@@ -48,7 +48,8 @@ import { createJobStore, type JobStore } from "../storage/job-store.js";
 import { createPackageWriter, type PackageWriter } from "./package-writer.js";
 import { detectEditorialSlop, detectFormatsSlop, formatSlopViolation } from "./no-ai-slop.js";
 import { assertPublicHttpUrl, systemPublicHostResolver, type PublicHostResolver } from "../security/public-host.js";
-import { buildAnglesPrompt, buildDiagnosisPrompt, buildDraftPrompt, buildEditorialQaPrompt, buildFormatsPrompt, buildFormatsQaPrompt, buildResearchPrompt, delimit, EDITORIAL_SYSTEM_PROMPT } from "./prompts.js";
+import { buildAnglesPrompt, buildDiagnosisPrompt, buildDraftPrompt, buildDraftRevisionPrompt, buildEditorialQaPrompt, buildFormatsPrompt, buildFormatsQaPrompt, buildResearchPrompt, delimit, EDITORIAL_SYSTEM_PROMPT } from "./prompts.js";
+import { createWriterProfileLoader, type WriterProfileLoader } from "./writer-profile.js";
 
 export type EditorialCollection = {
   anchors: EditorialResearchAnchor[];
@@ -64,8 +65,10 @@ export type EditorialGeneration = {
   angles(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; signal: AbortSignal }): Promise<EditorialAngleCandidates>;
   diagnosis(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; angle: EditorialAngleCandidate; signal: AbortSignal }): Promise<EditorialDiagnosis>;
   draft(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; signal: AbortSignal }): Promise<EditorialDraft>;
+  reviewDraft?(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; draft: EditorialDraft; signal: AbortSignal }): Promise<EditorialLintQa>;
+  reviseDraft?(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; draft: EditorialDraft; review: EditorialLintQa; signal: AbortSignal }): Promise<EditorialDraft>;
   formats(input: { job: EditorialJobInput; draft: EditorialDraft; diagnosis: EditorialDiagnosis; signal: AbortSignal }): Promise<EditorialFormats>;
-  qa?(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; draft: EditorialDraft; formats: EditorialFormats; signal: AbortSignal }): Promise<EditorialQa>;
+  qa?(input: { job: EditorialJobInput; researchPack: EditorialResearchPack; diagnosis: EditorialDiagnosis; draft: EditorialDraft; formats: EditorialFormats; editorialLint?: EditorialLintQa; signal: AbortSignal }): Promise<EditorialQa>;
 };
 
 export type EditorialRunnerOptions = {
@@ -343,10 +346,44 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const diagnosis = await readArtifact(job.id, "diagnosis.json", EditorialDiagnosisSchema.parse);
     if (from === "diagnosing" || from === "drafting") {
       if (current.state === "drafting") assertExecution(current, execution, "drafting");
-      const draft = EditorialDraftSchema.parse(await options.generation.draft({ job: job.input, researchPack, diagnosis, signal: execution.controller.signal }));
+      let draft = EditorialDraftSchema.parse(await options.generation.draft({ job: job.input, researchPack, diagnosis, signal: execution.controller.signal }));
       validateEditorialEvidence(researchPack, draft, diagnosis);
+      let draftWarning: string | null = null;
+      if (options.generation.reviewDraft) {
+        try {
+          let review = EditorialLintQaSchema.parse(await options.generation.reviewDraft({ job: job.input, researchPack, diagnosis, draft, signal: execution.controller.signal }));
+          if (hasActionableWritingFindings(review) && options.generation.reviseDraft) {
+            const beforeRef = await writeJsonArtifact(job.id, "editorial-lint.before-revision.json", review, execution, "drafting");
+            await addArtifact(job.id, beforeRef, "drafting");
+            try {
+              const revised = EditorialDraftSchema.parse(await options.generation.reviseDraft({ job: job.input, researchPack, diagnosis, draft, review, signal: execution.controller.signal }));
+              validateEditorialEvidence(researchPack, revised, diagnosis);
+              draft = revised;
+              draftWarning = "Foi aplicada uma revisão editorial automática única ao draft.";
+              try {
+                review = EditorialLintQaSchema.parse(await options.generation.reviewDraft({ job: job.input, researchPack, diagnosis, draft, signal: execution.controller.signal }));
+              } catch (error) {
+                if (execution.controller.signal.aborted) throw error;
+                logger.error(`Editorial revised draft recheck advisory failure job=${job.id} cause=${safeDiagnosticCause(error)}`);
+                review = lintAfterSingleRevision(review, detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation));
+                draftWarning = "Foi aplicada uma revisão editorial automática única; o segundo review não ficou disponível e foram preservados os checks locais.";
+              }
+            } catch (error) {
+              if (execution.controller.signal.aborted) throw error;
+              logger.error(`Editorial draft revision advisory failure job=${job.id} cause=${safeDiagnosticCause(error)}`);
+              draftWarning = "A revisão automática do draft não ficou disponível; o texto original e o QA permanecem disponíveis.";
+            }
+          }
+          const lintRef = await writeJsonArtifact(job.id, "editorial-lint.final.json", review, execution, "drafting");
+          await addArtifact(job.id, lintRef, "drafting");
+        } catch (error) {
+          if (execution.controller.signal.aborted) throw error;
+          logger.error(`Editorial draft review advisory failure job=${job.id} cause=${safeDiagnosticCause(error)}`);
+          draftWarning = "A revisão editorial do draft não ficou disponível; o processo continuou sem bloquear a aprovação humana.";
+        }
+      }
       const draftRef = await writeJsonArtifact(job.id, "draft.json", draft, execution, "drafting");
-      current = await completeStage(job.id, "drafting", draftRef);
+      current = await completeStage(job.id, "drafting", draftRef, draftWarning);
       current = await options.store.transition(job.id, "formatting", { stageSummaries: stageRunning(current.stageSummaries, "formatting") }, { revision: current.revision, state: "drafting" });
     }
     const draft = await readArtifact(job.id, "draft.json", EditorialDraftSchema.parse);
@@ -366,12 +403,22 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const diagnosis = await readArtifact(job.id, "diagnosis.json", EditorialDiagnosisSchema.parse);
     const draft = await readArtifact(job.id, "draft.json", EditorialDraftSchema.parse);
     const formats = await readArtifact(job.id, "formats.json", EditorialFormatsSchema.parse);
+    const editorialLint = await readOptionalArtifact(job.id, "editorial-lint.final.json", EditorialLintQaSchema.parse);
     validateEditorialEvidence(researchPack, draft, diagnosis);
-    const qa = EditorialQaSchema.parse(options.generation.qa
-      ? await options.generation.qa({ job: job.input, researchPack, diagnosis, draft, formats, signal: execution.controller.signal })
-      : evaluateEditorialQa(researchPack, draft, formats, diagnosis));
+    let qaWarning: string | null = null;
+    let qa: EditorialQa;
+    try {
+      qa = EditorialQaSchema.parse(options.generation.qa
+        ? await options.generation.qa({ job: job.input, researchPack, diagnosis, draft, formats, ...(editorialLint ? { editorialLint } : {}), signal: execution.controller.signal })
+        : evaluateEditorialQa(researchPack, draft, formats, diagnosis));
+    } catch (error) {
+      if (execution.controller.signal.aborted) throw error;
+      logger.error(`Editorial QA advisory failure job=${job.id} cause=${safeDiagnosticCause(error)}`);
+      qa = evaluateAdvisoryQa(researchPack, draft, formats, diagnosis, editorialLint);
+      qaWarning = "O QA de modelo não ficou disponível; os checks locais foram preservados e a aprovação humana continua disponível.";
+    }
     const qaRef = await writeJsonArtifact(job.id, "qa.json", qa, execution, "qa");
-    const current = await completeStage(job.id, "qa", qaRef);
+    const current = await completeStage(job.id, "qa", qaRef, qaWarning);
     return options.store.transition(current.id, "awaiting_final_approval", {}, { revision: current.revision, state: "qa" });
   }
 
@@ -399,6 +446,15 @@ export function createEditorialRunner(options: EditorialRunnerOptions): Editoria
     const storeWithRead = options.store as JobStore & { readArtifact?: (id: string, relativePath: string) => Promise<string> };
     if (!storeWithRead.readArtifact) throw new Error("Job store does not support artifact reads");
     return parse(JSON.parse(await storeWithRead.readArtifact(jobId, name)) as unknown);
+  }
+
+  async function readOptionalArtifact<T>(jobId: string, name: string, parse: (value: unknown) => T): Promise<T | undefined> {
+    try {
+      return await readArtifact(jobId, name, parse);
+    } catch (error) {
+      if (error instanceof Error && /does not exist|ENOENT/iu.test(error.message)) return undefined;
+      throw error;
+    }
   }
 
   async function failOrRethrow(jobId: string, execution: Execution, stage: EditorialJobStage, error: unknown): Promise<EditorialJob> {
@@ -508,7 +564,14 @@ export function createProductionEditorialRunner(
           (options) => runFirecrawlAgent(options, firecrawlConfig),
           (options) => searchFirecrawl(options, firecrawlConfig),
         ),
-        generation: createDeepSeekGeneration(deepseek),
+        generation: createDeepSeekGeneration(deepseek, {
+          loadWriterProfile: createWriterProfileLoader({
+            ...(environment.SCRAPE_AGENT_EDITORIAL_PROFILE_DIR?.trim()
+              ? { privateProfileDir: environment.SCRAPE_AGENT_EDITORIAL_PROFILE_DIR.trim() }
+              : {}),
+          }),
+          logger,
+        }),
         packageWriter: createPackageWriter(dataRoot),
         logger,
       });
@@ -643,7 +706,14 @@ export function createFirecrawlCollector(
   };
 }
 
-export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGeneration {
+export type DeepSeekGenerationOptions = {
+  loadWriterProfile?: WriterProfileLoader;
+  logger?: Pick<Console, "error">;
+};
+
+export function createDeepSeekGeneration(client: DeepSeekClient, options: DeepSeekGenerationOptions = {}): EditorialGeneration {
+  const loadWriterProfile = options.loadWriterProfile ?? createWriterProfileLoader();
+  const logger = options.logger ?? console;
   return {
     async research({ job, collection, signal }) {
       const topic = job.kind === "topic" ? job.topic : job.url;
@@ -663,15 +733,33 @@ export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGener
       return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: diagnosis. Return the diagnosis JSON and ledger.` }, { role: "user", content: buildDiagnosisPrompt(researchPack, angle) }], schema: EditorialDiagnosisSchema, signal });
     },
     async draft({ researchPack, diagnosis, signal }) {
-      return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: draft. Return the draft JSON.` }, { role: "user", content: buildDraftPrompt(researchPack, diagnosis) }], schema: EditorialDraftSchema, signal });
+      const writerProfile = await loadWriterProfile().catch((error) => {
+        logger.error(`Editorial writer profile advisory failure cause=${safeDiagnosticCause(error)}`);
+        return "";
+      });
+      return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: dedicated writer. Return the finished draft JSON.` }, { role: "user", content: buildDraftPrompt(researchPack, diagnosis, writerProfile) }], schema: EditorialDraftSchema, signal });
+    },
+    async reviewDraft({ researchPack, diagnosis, draft, signal }) {
+      const localViolations = detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation);
+      const model = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: pre-format draft editor. Return only the fixed structured editorial QA JSON. Include objective PT-PT errors and literal translations as actionable violations.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft, diagnosis) }], schema: EditorialLintQaSchema, signal }));
+      return EditorialLintQaSchema.parse({
+        ...model,
+        pass: model.pass && localViolations.length === 0,
+        model_verdict: localViolations.length > 0 ? "HOLD" : model.model_verdict,
+        violations: [...localViolations, ...model.violations].slice(0, 30),
+      });
+    },
+    async reviseDraft({ researchPack, diagnosis, draft, review, signal }) {
+      const writerProfile = await loadWriterProfile().catch(() => "");
+      return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: one bounded draft revision. Return the complete revised draft JSON.` }, { role: "user", content: buildDraftRevisionPrompt(researchPack, diagnosis, draft, review, writerProfile) }], schema: EditorialDraftSchema, signal });
     },
     async formats({ draft, diagnosis, signal }) {
       return client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: formats. Return the six derivatives and exactly ten publication slides JSON.` }, { role: "user", content: buildFormatsPrompt(draft, diagnosis) }], schema: EditorialFormatsSchema, signal });
     },
-    async qa({ researchPack, diagnosis, draft, formats, signal }) {
+    async qa({ researchPack, diagnosis, draft, formats, editorialLint: preparedEditorialLint, signal }) {
       const localEditorialViolations = detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation);
       const localFormatsViolations = detectFormatsSlop(formats).map(formatSlopViolation);
-      const modelEditorialLint = parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft, diagnosis) }], schema: EditorialLintQaSchema, signal }));
+      const modelEditorialLint = preparedEditorialLint ?? parseQaResult(EditorialLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured editorial QA. Return only the fixed structured editorial QA JSON.` }, { role: "user", content: buildEditorialQaPrompt(researchPack, draft, diagnosis) }], schema: EditorialLintQaSchema, signal }));
       const modelFormatsLint = parseQaResult(FormatsLintQaSchema, await client.completeJson({ messages: [{ role: "system", content: `${EDITORIAL_SYSTEM_PROMPT}\nStage: fixed structured formats QA. Return only the fixed structured formats QA JSON.` }, { role: "user", content: buildFormatsQaPrompt(draft, formats, diagnosis) }], schema: FormatsLintQaSchema, signal }));
       const editorialLint = EditorialLintQaSchema.parse({
         ...modelEditorialLint,
@@ -688,6 +776,26 @@ export function createDeepSeekGeneration(client: DeepSeekClient): EditorialGener
       return combinedEditorialQa(researchPack, draft, editorialLint, formatsLint);
     },
   };
+}
+
+function hasActionableWritingFindings(review: EditorialLintQa): boolean {
+  return review.violations.length > 0 || review.rhythmRisks.length > 0;
+}
+
+function lintAfterSingleRevision(review: EditorialLintQa, remainingViolations: string[]): EditorialLintQa {
+  const hasSourceRisks = review.sourceRisks.length > 0;
+  const pass = remainingViolations.length === 0 && !hasSourceRisks;
+  return EditorialLintQaSchema.parse({
+    pass,
+    model_verdict: pass ? "PASS" : "REVIEW",
+    violations: remainingViolations,
+    sourceRisks: review.sourceRisks,
+    rhythmRisks: [],
+  });
+}
+
+function safeDiagnosticCause(error: unknown): string {
+  return redactSensitiveText(error instanceof Error ? `${error.name}: ${error.message}` : String(error), 500);
 }
 
 const EditorialResearchSummarySchema = z.object({
@@ -727,6 +835,31 @@ function evaluateEditorialQa(researchPack: EditorialResearchPack, draft: Editori
     warnings: missing,
     checkedClaims: draft.claims.length,
     sourceUrls: anchors,
+  });
+}
+
+function evaluateAdvisoryQa(researchPack: EditorialResearchPack, draft: EditorialDraft, formats: EditorialFormats, diagnosis: EditorialDiagnosis, preparedEditorialLint?: EditorialLintQa): EditorialQa {
+  const editorialViolations = detectEditorialSlop(draft.bodyMarkdown).map(formatSlopViolation);
+  const formatViolations = detectFormatsSlop(formats).map(formatSlopViolation);
+  const editorialLint = preparedEditorialLint ?? EditorialLintQaSchema.parse({
+    pass: editorialViolations.length === 0,
+    model_verdict: editorialViolations.length === 0 ? "PASS" : "HOLD",
+    violations: editorialViolations,
+    sourceRisks: [],
+    rhythmRisks: [],
+  });
+  const formatsLint = FormatsLintQaSchema.parse({
+    pass: formatViolations.length === 0,
+    model_verdict: formatViolations.length === 0 ? "PASS" : "HOLD",
+    violations: formatViolations,
+    sourceRisks: [],
+    rhythmRisks: [],
+  });
+  const evidence = evaluateEditorialQa(researchPack, draft, formats, diagnosis);
+  return EditorialQaSchema.parse({
+    ...combinedEditorialQa(researchPack, draft, editorialLint, formatsLint),
+    passed: evidence.passed && qaCheckApproved(editorialLint) && qaCheckApproved(formatsLint),
+    warnings: [...evidence.warnings, ...qaWarnings(editorialLint, "Editorial QA"), ...qaWarnings(formatsLint, "Formats QA")].slice(0, 50),
   });
 }
 
