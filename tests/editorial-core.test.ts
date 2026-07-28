@@ -111,12 +111,15 @@ describe("editorial control-plane contracts", () => {
       "A pergunta que fica não é a velocidade. A pergunta é quem controla a distribuição.",
       "O verdadeiro debate está para vir.",
       "A parte que ninguém vê é o custo de integração.",
+      "O detalhe que salta à vista: a Apple contactou a OpenAI em fevereiro.",
+      "O que fazer? Rever primeiro os factos do processo.",
+      "A guerra dos segredos comerciais está só a começar.",
       "Segundo os relatos (BBC, Reuters, CNBC), o produto chegou ontem.",
       "Faça uma lista antes de decidir.",
       "O modelo é rápido — mas a latência continua visível.",
     ].join("\n"));
     const rules = new Set(violations.map((violation) => violation.rule));
-    assert.deepEqual(rules, new Set(["binary_contrast", "fake_kicker", "faux_insight", "citation_chain", "formal_address", "em_dash"]));
+    assert.deepEqual(rules, new Set(["binary_contrast", "fake_kicker", "faux_insight", "colon_reveal", "rhetorical_setup", "importance_puffery", "citation_chain", "formal_address", "em_dash"]));
     assert.deepEqual(detectEditorialSlop("A empresa lançou o modelo em julho. O preço baixou 20% e a API manteve o mesmo contrato."), []);
   });
 
@@ -169,6 +172,10 @@ describe("editorial control-plane contracts", () => {
     const draftPrompt = generationPrompts[2]!;
     assert.equal(draftPrompt.split(EDITORIAL_VOICE).length - 1, 1);
     assert.equal(draftPrompt.includes(EDITORIAL_NO_SLOP_CRITERIA), false);
+    assert.match(draftPrompt, /Afirma diretamente o enquadramento útil/iu);
+    assert.match(draftPrompt, /Não uses dois pontos para encenar uma revelação/iu);
+    assert.match(draftPrompt, /Não uses perguntas retóricas com resposta imediata/iu);
+    assert.match(draftPrompt, /No texto publicado, integra facto e inferência no fluxo/iu);
     assert.match(draftPrompt, /Preserve every INFERÊNCIA and HIPÓTESE as interpretation/iu);
     assert.match(draftPrompt, /A distribuição pode concentrar-se no operador/iu);
     assert.match(draftPrompt, /O operador pode fechar o circuito no próximo ciclo/iu);

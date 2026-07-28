@@ -1,7 +1,7 @@
 import type { EditorialFormats } from "../schemas/editorial-generation.js";
 
 export type EditorialSlopViolation = {
-  rule: "binary_contrast" | "faux_insight" | "fake_kicker" | "citation_chain" | "formal_address" | "filler" | "em_dash";
+  rule: "binary_contrast" | "faux_insight" | "colon_reveal" | "rhetorical_setup" | "importance_puffery" | "fake_kicker" | "citation_chain" | "formal_address" | "filler" | "em_dash";
   quote: string;
   why: string;
 };
@@ -22,6 +22,21 @@ const RULES: ReadonlyArray<{
     rule: "faux_insight",
     pattern: /\b(?:o que interessa(?: aqui)? é|o verdadeiro (?:problema|debate|gargalo|furo)|a parte que ninguém (?:vê|conta)|a verdade é|a verdadeira questão é)(?=\s|[,;:.!?]|$)[^.!?\n]{0,180}/giu,
     why: "Anuncia profundidade ou exclusividade antes de entregar o mecanismo concreto.",
+  },
+  {
+    rule: "colon_reveal",
+    pattern: /(?:^|\n)\s*(?:(?:o detalhe que (?:salta à vista|muda a leitura)|o incentivo\b[^:\n]{0,80}\bé claro|a mudança é concreta)|(?:facto|inferência))\s*:[^\n]{1,220}/gimu,
+    why: "Encena uma revelação ou introduz um rótulo editorial em vez de integrar diretamente o facto ou a leitura no texto.",
+  },
+  {
+    rule: "rhetorical_setup",
+    pattern: /(?:^|\n)\s*(?:o que fazer|e agora|o que muda)\?\s*[^\n]{1,220}/gimu,
+    why: "Faz uma pergunta retórica e responde-lhe de imediato; a recomendação ou consequência pode ser afirmada diretamente.",
+  },
+  {
+    rule: "importance_puffery",
+    pattern: /\b(?:a guerra\b[^.!?\n]{0,120}\bestá só a começar|marca um momento (?:decisivo|fundamental|crucial)|sublinha a importância|consolida a sua posição)\b[^.!?\n]{0,120}/giu,
+    why: "Aumenta artificialmente a importância do ponto em vez de terminar num facto, consequência ou próximo passo concreto.",
   },
   {
     rule: "fake_kicker",
