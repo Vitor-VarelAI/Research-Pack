@@ -3,7 +3,7 @@
  *
  * Records each request's URL and parsed JSON body to the file path in
  * `MOCK_FIRECRAWL_RECORD` (a JSON array appended in-place), so tests can
- * assert that scrape/agent payloads include `maxAge`.
+ * assert that scrape payloads include `maxAge` while agent payloads omit it.
  *
  * The response shape mirrors Firecrawl v2 enough for the provider parser and
  * includes optional cache-provenance fields (`fromCache`, `cacheState`,
