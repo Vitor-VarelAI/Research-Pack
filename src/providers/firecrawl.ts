@@ -83,7 +83,152 @@ type FirecrawlConfig = {
   baseUrl: string;
   pollIntervalMs: number;
   pollTimeoutMs: number;
+  requestTimeoutMs: number;
+  maxRetries: number;
+  retryBaseDelayMs: number;
 };
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RETRIES = 2;
+const DEFAULT_RETRY_BASE_DELAY_MS = 250;
+const TRANSIENT_FIRECRAWL_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const CONFIG_INTEGER_PATTERN = /^\d+$/;
+
+class FirecrawlHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(`Firecrawl ${status}: ${message}`);
+    this.name = "FirecrawlHttpError";
+    this.status = status;
+  }
+}
+
+function resolveConfiguredInt(
+  value: number | undefined,
+  envName: string,
+  fallback: number,
+  bounds: { min: number; max: number },
+): number {
+  if (value !== undefined) {
+    if (!Number.isSafeInteger(value) || value < bounds.min || value > bounds.max) {
+      throw new Error(`${envName} must be an integer between ${bounds.min} and ${bounds.max}`);
+    }
+    return value;
+  }
+
+  const raw = process.env[envName];
+  if (raw === undefined || raw === "") return fallback;
+  if (!CONFIG_INTEGER_PATTERN.test(raw)) {
+    throw new Error(`${envName} must be an integer between ${bounds.min} and ${bounds.max}`);
+  }
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(parsed) || parsed < bounds.min || parsed > bounds.max) {
+    throw new Error(`${envName} must be an integer between ${bounds.min} and ${bounds.max}`);
+  }
+  return parsed;
+}
+
+function resolveFirecrawlConfig(config?: Partial<FirecrawlConfig>): FirecrawlConfig {
+  const apiKey = config?.apiKey ?? process.env.FIRECRAWL_API_KEY;
+  if (!apiKey) {
+    throw new Error("Missing FIRECRAWL_API_KEY. Create .env or export it before running.");
+  }
+
+  return {
+    apiKey,
+    baseUrl: config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2",
+    pollIntervalMs: config?.pollIntervalMs ?? 2_000,
+    pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
+    requestTimeoutMs: resolveConfiguredInt(config?.requestTimeoutMs, "FIRECRAWL_REQUEST_TIMEOUT_MS", DEFAULT_REQUEST_TIMEOUT_MS, {
+      min: 1,
+      max: 300_000,
+    }),
+    maxRetries: resolveConfiguredInt(config?.maxRetries, "FIRECRAWL_MAX_RETRIES", DEFAULT_MAX_RETRIES, { min: 0, max: 5 }),
+    retryBaseDelayMs: resolveConfiguredInt(config?.retryBaseDelayMs, "FIRECRAWL_RETRY_BASE_DELAY_MS", DEFAULT_RETRY_BASE_DELAY_MS, {
+      min: 0,
+      max: 30_000,
+    }),
+  };
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryDelayMs(attempt: number, baseDelayMs: number): number {
+  return baseDelayMs * (2 ** attempt);
+}
+
+function parseResponseBody(text: string): unknown {
+  if (!text) return {};
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function errorMessageFromBody(body: unknown, fallback: string): string {
+  if (typeof body === "object" && body !== null && "error" in body) {
+    return String(body.error);
+  }
+  if (typeof body === "string" && body.length > 0) return body;
+  return fallback;
+}
+
+async function fetchTextWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<{ response: Response; text: string }> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    const text = await response.text();
+    return { response, text };
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`Firecrawl request timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function requestFirecrawlJson(resolved: FirecrawlConfig, target: string, init: RequestInit): Promise<unknown> {
+  const url = /^https?:\/\//i.test(target) ? target : `${resolved.baseUrl}${target}`;
+
+  for (let attempt = 0; ; attempt += 1) {
+    const { response, text } = await fetchTextWithTimeout(
+      url,
+      {
+        ...init,
+        headers: {
+          "Authorization": `Bearer ${resolved.apiKey}`,
+          "Content-Type": "application/json",
+          ...(init.headers ?? {}),
+        },
+      },
+      resolved.requestTimeoutMs,
+    );
+
+    const body = parseResponseBody(text);
+    if (response.ok) return body;
+
+    const message = errorMessageFromBody(body, text);
+    if (TRANSIENT_FIRECRAWL_STATUSES.has(response.status) && attempt < resolved.maxRetries) {
+      await sleep(retryDelayMs(attempt, resolved.retryBaseDelayMs));
+      continue;
+    }
+
+    throw new FirecrawlHttpError(response.status, message);
+  }
+}
 
 export type FirecrawlAgentOptions = {
   prompt: string;
@@ -136,15 +281,13 @@ function buildProvenance(
 
   if (typeof response.cacheState === "string" && response.cacheState.length > 0) {
     cacheStatus = response.cacheState;
-    const normalized = response.cacheState.toLowerCase();
-    cacheState = normalized === "hit" || normalized === "cached" ? "cached" : "fresh";
+    cacheState = normalizeCacheState(response.cacheState);
   } else if (typeof response.fromCache === "boolean") {
     cacheState = response.fromCache ? "cached" : "fresh";
     cacheStatus = `fromCache:${response.fromCache}`;
   } else if (typeof metadata.cacheState === "string" && metadata.cacheState.length > 0) {
     cacheStatus = metadata.cacheState;
-    const normalized = metadata.cacheState.toLowerCase();
-    cacheState = normalized === "hit" || normalized === "cached" ? "cached" : "fresh";
+    cacheState = normalizeCacheState(metadata.cacheState);
   }
 
   return {
@@ -154,6 +297,13 @@ function buildProvenance(
     cacheState,
     cacheStatus,
   };
+}
+
+function normalizeCacheState(value: string): "fresh" | "cached" | "unknown" {
+  const normalized = value.toLowerCase();
+  if (normalized === "hit" || normalized === "cached") return "cached";
+  if (normalized === "miss" || normalized === "fresh") return "fresh";
+  return "unknown";
 }
 
 function toDocument(url: string, data: FirecrawlPageData, provenance: Provenance): ScrapedDocument {
@@ -178,17 +328,7 @@ function toDocument(url: string, data: FirecrawlPageData, provenance: Provenance
 }
 
 export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): CrawlProvider {
-  const apiKey = config?.apiKey ?? process.env.FIRECRAWL_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing FIRECRAWL_API_KEY. Create .env or export it before running.");
-  }
-
-  const resolved: FirecrawlConfig = {
-    apiKey,
-    baseUrl: config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2",
-    pollIntervalMs: config?.pollIntervalMs ?? 2_000,
-    pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
-  };
+  const resolved = resolveFirecrawlConfig(config);
 
   /**
    * Issue an authenticated Firecrawl request. `target` may be either a path
@@ -198,23 +338,7 @@ export function createFirecrawlProvider(config?: Partial<FirecrawlConfig>): Craw
    * `resolveNextUrl` + `assertSameOrigin` for provider-supplied `next` URLs.
    */
   async function request(target: string, init: RequestInit): Promise<unknown> {
-    const url = /^https?:\/\//i.test(target) ? target : `${resolved.baseUrl}${target}`;
-    const response = await fetch(url, {
-      ...init,
-      headers: {
-        "Authorization": `Bearer ${resolved.apiKey}`,
-        "Content-Type": "application/json",
-        ...(init.headers ?? {}),
-      },
-    });
-
-    const text = await response.text();
-    const body: unknown = text ? JSON.parse(text) : {};
-    if (!response.ok) {
-      const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
-      throw new Error(`Firecrawl ${response.status}: ${message}`);
-    }
-    return body;
+    return requestFirecrawlJson(resolved, target, init);
   }
 
   function normalizeMapLinks(links: FirecrawlMapLink[]): string[] {
@@ -376,20 +500,11 @@ export async function scrapeFirecrawlStructured(
   options: FirecrawlStructuredScrapeOptions,
   config?: Partial<FirecrawlConfig>,
 ): Promise<FirecrawlStructuredScrapeResult> {
-  const apiKey = config?.apiKey ?? process.env.FIRECRAWL_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing FIRECRAWL_API_KEY. Create .env or export it before running.");
-  }
-
-  const baseUrl = config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2";
+  const resolved = resolveFirecrawlConfig(config);
   const requestedAt = nowIso();
   const maxAgeMs = options.maxAgeMs;
-  const response = await fetch(`${baseUrl}/scrape`, {
+  const body = await requestFirecrawlJson(resolved, "/scrape", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
     body: JSON.stringify({
       url: options.url,
       formats: [
@@ -402,13 +517,6 @@ export async function scrapeFirecrawlStructured(
     }),
   });
 
-  const text = await response.text();
-  const body: unknown = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
-    throw new Error(`Firecrawl ${response.status}: ${message}`);
-  }
-
   const parsed = FirecrawlScrapeResponseSchema.parse(body);
   if (parsed.success === false || !parsed.data) throw new Error(parsed.error ?? "Firecrawl structured scrape failed");
   if (parsed.data.json === undefined) throw new Error("Firecrawl structured scrape returned no JSON data");
@@ -419,41 +527,19 @@ export async function scrapeFirecrawlStructured(
 }
 
 export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?: Partial<FirecrawlConfig>): Promise<FirecrawlAgentResult> {
-  const apiKey = config?.apiKey ?? process.env.FIRECRAWL_API_KEY;
-  if (!apiKey) {
-    throw new Error("Missing FIRECRAWL_API_KEY. Create .env or export it before running.");
-  }
-
-  const resolved: FirecrawlConfig = {
-    apiKey,
-    baseUrl: config?.baseUrl ?? process.env.FIRECRAWL_BASE_URL ?? "https://api.firecrawl.dev/v2",
-    pollIntervalMs: config?.pollIntervalMs ?? 2_000,
-    pollTimeoutMs: config?.pollTimeoutMs ?? 120_000,
-  };
+  const resolved = resolveFirecrawlConfig(config);
 
   const requestedAt = nowIso();
   const maxAgeMs = options.maxAgeMs;
-  const response = await fetch(`${resolved.baseUrl}/agent`, {
+  const body = await requestFirecrawlJson(resolved, "/agent", {
     method: "POST",
-    headers: {
-      "Authorization": `Bearer ${resolved.apiKey}`,
-      "Content-Type": "application/json",
-    },
     body: JSON.stringify({
       prompt: options.prompt,
       ...(options.urls ? { urls: options.urls } : {}),
       ...(options.schema ? { schema: options.schema } : {}),
       ...(options.model ? { model: options.model } : {}),
-      ...(maxAgeMs !== undefined ? { maxAge: maxAgeMs } : {}),
     }),
   });
-
-  const text = await response.text();
-  const body: unknown = text ? JSON.parse(text) : {};
-  if (!response.ok) {
-    const message = typeof body === "object" && body !== null && "error" in body ? String(body.error) : text;
-    throw new Error(`Firecrawl ${response.status}: ${message}`);
-  }
 
   const parsed = FirecrawlAgentResponseSchema.parse(body);
   if (parsed.success === false) throw new Error(parsed.error ?? "Firecrawl agent failed");
@@ -466,16 +552,9 @@ export async function runFirecrawlAgent(options: FirecrawlAgentOptions, config?:
   const pollIntervalMs = options.pollIntervalMs ?? resolved.pollIntervalMs;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
-    const statusResponse = await fetch(`${resolved.baseUrl}/agent/${parsed.id}`, {
+    const statusBody = await requestFirecrawlJson(resolved, `/agent/${parsed.id}`, {
       method: "GET",
-      headers: { "Authorization": `Bearer ${resolved.apiKey}` },
     });
-    const statusText = await statusResponse.text();
-    const statusBody: unknown = statusText ? JSON.parse(statusText) : {};
-    if (!statusResponse.ok) {
-      const message = typeof statusBody === "object" && statusBody !== null && "error" in statusBody ? String(statusBody.error) : statusText;
-      throw new Error(`Firecrawl ${statusResponse.status}: ${message}`);
-    }
     const status = FirecrawlAgentResponseSchema.parse(statusBody);
     if (status.success === false) throw new Error(status.error ?? "Firecrawl agent failed");
     if (status.data !== undefined) {
